@@ -78,8 +78,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           const hash = await computeSHA256(buffer);
           const fileId = `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-          // Store raw ArrayBuffer in memory
-          storeFileBuffer(fileId, buffer);
+          // Store raw ArrayBuffer in memory (cloned for longevity)
+          storeFileBuffer(fileId, buffer.slice(0));
 
           const uploadedFile: UploadedFile = {
             id: fileId,

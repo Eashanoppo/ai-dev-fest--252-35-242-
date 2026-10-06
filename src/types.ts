@@ -104,7 +104,7 @@ export interface AssistantMessage {
 export interface AssistantConfig {
   apiKey: string;
   model: string;
-  provider: 'gemini';
+  provider: 'groq' | 'gemini';
 }
 
 export interface GenerateProgress {
