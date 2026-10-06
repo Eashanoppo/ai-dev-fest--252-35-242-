@@ -31,65 +31,69 @@ export const TopBar: React.FC<TopBarProps> = ({
   onImportProject,
 }) => {
   return (
-    <header className="h-[60px] border-b border-border bg-surface px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 select-none">
-      {/* Left: Official SaaS Logo, Wordmark & Tender Chip */}
-      <div className="flex items-center gap-3.5">
+    <header className="h-14 border-b border-border bg-surface px-4 sm:px-6 flex items-center justify-between sticky top-0 z-30 select-none backdrop-blur-md">
+      {/* Left: Brand area with clean geometry and subtle hierarchy */}
+      <div className="flex items-center gap-4">
         <div className="flex items-center gap-2.5">
           <img
             src="/favicon.ico"
-            alt="TenderPack Logo"
-            className="w-7 h-7 rounded-md object-contain border border-border shadow-2xs"
+            alt="TenderPack"
+            className="w-5 h-5 rounded object-contain border border-border"
           />
-          <span className="font-bold text-sm tracking-wider text-primary">
-            {t('app_name', undefined, lang)}
-          </span>
-          <span className="text-muted text-xs font-normal hidden md:inline">/</span>
-          <span className="text-muted text-xs font-normal hidden md:inline">
-            {t('app_subtitle', undefined, lang)}
-          </span>
+          <div className="flex items-baseline gap-2">
+            <span className="font-semibold text-xs tracking-wider text-primary uppercase font-mono">
+              {t('app_name', undefined, lang)}
+            </span>
+            <span className="text-muted text-xs hidden md:inline font-normal">
+              {t('app_subtitle', undefined, lang)}
+            </span>
+          </div>
         </div>
 
+        {/* Tender active/inactive indicator */}
+        <div className="h-4 w-px bg-border hidden sm:block" />
+
         {tenderId ? (
-          <span
+          <div
             id="tender-active-chip"
-            className="text-xs font-mono px-2 py-0.5 rounded bg-subtle text-primary border border-border font-medium"
+            className="inline-flex items-center gap-1.5 text-xs text-secondary font-mono bg-surface-subtle px-2 py-0.5 rounded border border-border"
           >
-            {t('tender_chip', { id: tenderId }, lang)}
-          </span>
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+            <span>{tenderId}</span>
+          </div>
         ) : (
-          <span
+          <div
             id="tender-inactive-chip"
-            className="text-xs font-mono px-2 py-0.5 rounded bg-subtle text-muted border border-border"
+            className="inline-flex items-center gap-1.5 text-xs text-muted font-mono bg-surface-subtle px-2 py-0.5 rounded border border-border"
           >
-            {t('no_tender_loaded', undefined, lang)}
-          </span>
+            <span className="w-1.5 h-1.5 rounded-full bg-neutral-400" />
+            <span>{t('no_tender_loaded', undefined, lang)}</span>
+          </div>
         )}
       </div>
 
-      {/* Right: Actions, Language Segmented Control, Theme Toggle, Assistant */}
-      <div className="flex items-center gap-2 sm:gap-3">
-        {/* CSV Export Button (if tender loaded) */}
+      {/* Right: Compact actions, segmented control, theme and assistant */}
+      <div className="flex items-center gap-2 sm:gap-2.5">
         {tenderId && onExportCsv && (
           <button
             type="button"
             onClick={onExportCsv}
-            className="hidden lg:flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-border text-xs font-medium text-primary hover:bg-subtle transition-colors cursor-pointer"
+            className="hidden lg:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border text-xs font-medium text-secondary hover:text-primary hover:bg-surface-subtle transition-colors cursor-pointer"
             title={t('btn_export_csv', undefined, lang)}
           >
-            <DownloadIcon size={14} />
-            <span>{t('btn_export_csv', undefined, lang)}</span>
+            <DownloadIcon size={13} />
+            <span>CSV</span>
           </button>
         )}
 
-        {/* Project Backup & Restore Buttons */}
         {tenderId && onExportProject && (
           <button
             type="button"
             onClick={onExportProject}
-            className="hidden xl:flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-border text-xs font-medium text-primary hover:bg-subtle transition-colors cursor-pointer"
+            className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border text-xs font-medium text-secondary hover:text-primary hover:bg-surface-subtle transition-colors cursor-pointer"
             title={t('btn_project_export', undefined, lang)}
           >
-            <DownloadIcon size={14} />
+            <DownloadIcon size={13} />
             <span>{t('btn_project_export', undefined, lang)}</span>
           </button>
         )}
@@ -98,10 +102,10 @@ export const TopBar: React.FC<TopBarProps> = ({
           <button
             type="button"
             onClick={onImportProject}
-            className="hidden xl:flex items-center gap-1.5 px-2.5 py-1.5 rounded border border-border text-xs font-medium text-primary hover:bg-subtle transition-colors cursor-pointer"
+            className="hidden xl:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-border text-xs font-medium text-secondary hover:text-primary hover:bg-surface-subtle transition-colors cursor-pointer"
             title={t('btn_project_import', undefined, lang)}
           >
-            <UploadIcon size={14} />
+            <UploadIcon size={13} />
             <span>{t('btn_project_import', undefined, lang)}</span>
           </button>
         )}
@@ -110,17 +114,17 @@ export const TopBar: React.FC<TopBarProps> = ({
         <button
           type="button"
           onClick={onOpenSettings}
-          className="p-2 rounded border border-border bg-surface text-muted hover:text-primary hover:bg-subtle transition-colors cursor-pointer"
+          className="p-1.5 rounded-md border border-border text-muted hover:text-primary hover:bg-surface-subtle transition-colors cursor-pointer"
           title={t('btn_settings', undefined, lang)}
           aria-label={t('btn_settings', undefined, lang)}
         >
-          <SettingsIcon size={16} />
+          <SettingsIcon size={15} />
         </button>
 
         {/* EN | বাং Segmented control */}
         <div
           id="lang-segmented-control"
-          className="flex items-center p-0.5 rounded border border-border bg-subtle text-xs"
+          className="flex items-center p-0.5 rounded-md border border-border bg-surface-subtle text-xs"
           role="radiogroup"
           aria-label="Language selection"
         >
@@ -128,9 +132,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             type="button"
             id="lang-toggle-en"
             onClick={() => onLanguageChange('en')}
-            className={`px-2.5 py-1 rounded transition-colors font-medium cursor-pointer ${
+            className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
               lang === 'en'
-                ? 'bg-accent-steel text-white shadow-xs'
+                ? 'bg-surface text-primary shadow-2xs font-semibold'
                 : 'text-muted hover:text-primary'
             }`}
             aria-checked={lang === 'en'}
@@ -142,9 +146,9 @@ export const TopBar: React.FC<TopBarProps> = ({
             type="button"
             id="lang-toggle-bn"
             onClick={() => onLanguageChange('bn')}
-            className={`px-2.5 py-1 rounded transition-colors font-medium font-bangla cursor-pointer ${
+            className={`px-2 py-0.5 rounded text-[11px] font-medium font-bangla transition-colors cursor-pointer ${
               lang === 'bn'
-                ? 'bg-accent-steel text-white shadow-xs'
+                ? 'bg-surface text-primary shadow-2xs font-semibold'
                 : 'text-muted hover:text-primary'
             }`}
             aria-checked={lang === 'bn'}
@@ -159,34 +163,26 @@ export const TopBar: React.FC<TopBarProps> = ({
           type="button"
           id="theme-toggle-btn"
           onClick={onThemeToggle}
-          className="p-2 rounded border border-border bg-surface text-muted hover:text-primary hover:bg-subtle transition-colors cursor-pointer"
-          aria-label={
-            theme === 'dark'
-              ? t('toggle_theme_light', undefined, lang)
-              : t('toggle_theme_dark', undefined, lang)
-          }
-          title={
-            theme === 'dark'
-              ? t('toggle_theme_light', undefined, lang)
-              : t('toggle_theme_dark', undefined, lang)
-          }
+          className="p-1.5 rounded-md border border-border text-muted hover:text-primary hover:bg-surface-subtle transition-colors cursor-pointer"
+          aria-label={theme === 'dark' ? t('toggle_theme_light', undefined, lang) : t('toggle_theme_dark', undefined, lang)}
+          title={theme === 'dark' ? t('toggle_theme_light', undefined, lang) : t('toggle_theme_dark', undefined, lang)}
         >
-          {theme === 'dark' ? <SunIcon size={16} /> : <MoonIcon size={16} />}
+          {theme === 'dark' ? <SunIcon size={15} /> : <MoonIcon size={15} />}
         </button>
 
-        {/* Assistant Button with Steel Outline */}
+        {/* AI Assistant Button */}
         <button
           type="button"
           id="assistant-toggle-btn"
           onClick={onAssistantToggle}
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-medium transition-colors cursor-pointer ${
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium transition-colors cursor-pointer ${
             isAssistantOpen
-              ? 'border-accent-steel bg-accent-steel text-white'
-              : 'border-accent-steel/50 text-accent-steel hover:bg-accent-steel/10'
+              ? 'border-primary bg-primary text-surface'
+              : 'border-border text-secondary hover:text-primary hover:bg-surface-subtle'
           }`}
           aria-label={t('ai_assistant', undefined, lang)}
         >
-          <BotIcon size={16} />
+          <BotIcon size={14} />
           <span className="hidden sm:inline">{t('ai_assistant', undefined, lang)}</span>
         </button>
       </div>

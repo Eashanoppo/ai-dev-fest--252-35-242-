@@ -29,38 +29,38 @@ export const FileRow: React.FC<FileRowProps> = ({
   return (
     <div
       id={`file-row-${file.id}`}
-      className={`flex items-center justify-between p-3 rounded border text-xs transition-colors bg-surface ${
+      className={`group flex items-center justify-between p-2.5 rounded-lg border text-xs transition-all bg-surface hover:bg-surface-subtle/50 ${
         !file.valid
-          ? 'border-[#A63D40]/30 bg-[#F6E9E9]/20 dark:bg-[#271617]/20'
+          ? 'border-rose-300 dark:border-rose-900/60 bg-rose-50/20 dark:bg-rose-950/20'
           : isDuplicate
-          ? 'border-[#A63D40]/40'
+          ? 'border-amber-300 dark:border-amber-900/50'
           : 'border-border'
       }`}
     >
       {/* Left: Icon & File Meta */}
-      <div className="flex items-center gap-3 min-w-0 flex-1 mr-2">
-        <div className="text-muted shrink-0">
+      <div className="flex items-center gap-2.5 min-w-0 flex-1 mr-2">
+        <div className="text-muted shrink-0 flex items-center justify-center w-7 h-7 rounded bg-surface-subtle border border-border">
           {!file.valid ? (
-            <AlertIcon size={18} className="text-[#A63D40] dark:text-[#D98A8C]" />
+            <AlertIcon size={14} className="text-rose-600 dark:text-rose-400" />
           ) : (
-            <FileIcon size={18} />
+            <FileIcon size={14} className="text-secondary" />
           )}
         </div>
 
         <div className="flex flex-col min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span
-              className="font-medium text-primary truncate max-w-[200px] sm:max-w-[280px]"
+              className="font-medium text-primary text-[13px] truncate max-w-[180px] sm:max-w-[240px]"
               title={file.name}
             >
               {file.name}
             </span>
 
-            {/* Duplicate badge (Red outline per design.md) */}
+            {/* Duplicate badge */}
             {isDuplicate && (
               <span
                 id={`duplicate-badge-${file.id}`}
-                className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded border border-[#A63D40] text-[#A63D40] dark:border-[#D98A8C] dark:text-[#D98A8C] text-[10px] font-medium shrink-0"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400 text-[10px] font-mono shrink-0"
                 title={
                   duplicateSiblings.length > 0
                     ? `${t('tag_duplicate', undefined, lang)}: ${duplicateSiblings.join(', ')}`
@@ -74,16 +74,16 @@ export const FileRow: React.FC<FileRowProps> = ({
 
             {/* Unreadable badge */}
             {!file.valid && (
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded bg-[#F6E9E9] text-[#A63D40] dark:bg-[#271617] dark:text-[#D98A8C] text-[10px] font-medium shrink-0">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-rose-300 dark:border-rose-800 text-rose-700 dark:text-rose-400 text-[10px] font-mono shrink-0">
                 {t('tag_unreadable', undefined, lang)}
               </span>
             )}
           </div>
 
-          <div className="flex items-center gap-2 text-[11px] text-muted mt-0.5">
+          <div className="flex items-center gap-1.5 text-[11px] text-muted mt-0.5">
             {file.valid && (
               <>
-                <span className="tabular-nums">
+                <span className="tabular-nums font-mono">
                   {t(
                     'pages_chip',
                     {
@@ -96,7 +96,7 @@ export const FileRow: React.FC<FileRowProps> = ({
                     lang
                   )}
                 </span>
-                <span>·</span>
+                <span className="text-border-strong">·</span>
               </>
             )}
             <span className="tabular-nums font-mono">
@@ -106,9 +106,9 @@ export const FileRow: React.FC<FileRowProps> = ({
             {/* Matched Requirement Link Chip */}
             {matchedRequirement && (
               <>
-                <span>·</span>
+                <span className="text-border-strong">·</span>
                 <span
-                  className="text-accent-steel font-medium truncate max-w-[180px]"
+                  className="text-accent font-medium truncate max-w-[160px]"
                   title={`Matched to: ${matchedRequirement.id} - ${reqTitle}`}
                 >
                   → {matchedRequirement.id} {reqTitle}
@@ -125,11 +125,11 @@ export const FileRow: React.FC<FileRowProps> = ({
           type="button"
           id={`remove-file-${file.id}`}
           onClick={() => onRemove(file.id)}
-          className="p-1.5 rounded text-muted hover:text-[#A63D40] dark:hover:text-[#D98A8C] hover:bg-subtle transition-colors cursor-pointer"
+          className="p-1.5 rounded text-muted hover:text-rose-600 dark:hover:text-rose-400 hover:bg-surface-subtle transition-colors cursor-pointer"
           aria-label={t('btn_remove', undefined, lang)}
           title={t('btn_remove', undefined, lang)}
         >
-          <TrashIcon size={15} />
+          <TrashIcon size={14} />
         </button>
       </div>
     </div>

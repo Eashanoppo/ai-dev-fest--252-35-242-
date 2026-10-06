@@ -5,7 +5,7 @@ import { computeSHA256 } from '../lib/hash';
 import { inspectPdf } from '../lib/pdfInspect';
 import { setFileBuffer } from '../lib/fileStore';
 import { autoMatchFiles } from '../lib/match';
-import { UploadIcon, SparklesIcon } from './icons';
+import { UploadIcon } from './icons';
 
 interface UploadZoneProps {
   currentFiles: UploadedFile[];
@@ -42,7 +42,6 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
       const filesArray = Array.from(fileList);
       if (filesArray.length === 0) return;
 
-      // 1. Check count limit (TC 1.5)
       if (currentCount + filesArray.length > MAX_FILES) {
         onToast(
           'error',
@@ -52,7 +51,6 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
         return;
       }
 
-      // 2. Check total size limit (TC 1.5)
       const incomingBytes = filesArray.reduce((acc, f) => acc + f.size, 0);
       if (currentSizeBytes + incomingBytes > MAX_TOTAL_SIZE_BYTES) {
         onToast(
@@ -69,11 +67,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
       for (const file of filesArray) {
         try {
           const buffer = await file.arrayBuffer();
-
-          // Inspect PDF magic bytes and parse structure
           const inspectResult = await inspectPdf(buffer);
 
-          // TC 1.2: If magic %PDF is missing, reject completely
           if (!inspectResult.valid && inspectResult.errorKind === 'damaged' && inspectResult.error?.includes('missing %PDF')) {
             onToast(
               'error',
@@ -83,11 +78,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             continue;
           }
 
-          // Calculate SHA-256 hash
           const hash = await computeSHA256(buffer);
           const fileId = `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-          // Store buffer in memory store
           setFileBuffer(fileId, buffer.slice(0));
 
           const uploadedFile: UploadedFile = {
@@ -101,7 +93,6 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             error: inspectResult.error,
           };
 
-          // TC 1.4: Corrupted or password-protected PDF
           if (!inspectResult.valid) {
             onToast(
               'warning',
@@ -184,17 +175,17 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
   };
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2.5">
       <div
         id="pdf-upload-dropzone"
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`border-[1.5px] border-dashed rounded-xl p-6 text-center cursor-pointer transition-all duration-150 flex flex-col items-center justify-center gap-2 ${
+        className={`border border-dashed rounded-lg p-4 sm:p-5 text-center cursor-pointer transition-colors duration-150 flex flex-col items-center justify-center gap-1.5 ${
           isDragOver
-            ? 'border-accent-steel bg-subtle'
-            : 'border-border bg-surface hover:border-accent-steel/60'
+            ? 'border-primary bg-surface-subtle'
+            : 'border-border bg-surface hover:border-secondary'
         } ${isProcessing ? 'opacity-60 pointer-events-none' : ''}`}
         role="button"
         tabIndex={0}
@@ -211,8 +202,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           disabled={isProcessing}
         />
 
-        <div className="p-2.5 rounded-full bg-subtle text-muted">
-          <UploadIcon size={22} />
+        <div className="p-2 rounded-full bg-surface-subtle text-muted">
+          <UploadIcon size={18} />
         </div>
 
         <div>
@@ -229,7 +220,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
         </div>
       </div>
 
-      <div className="flex justify-between items-center text-[11px] text-muted px-1 font-mono">
+      <div className="flex justify-between items-center text-[11px] text-muted px-0.5 font-mono">
         <span>
           {t(
             'upload_limit_info',
@@ -246,9 +237,8 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             type="button"
             id="auto-match-btn"
             onClick={handleAutoMatch}
-            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-accent-steel/10 hover:bg-accent-steel/20 text-accent-steel font-medium font-sans text-xs transition-colors cursor-pointer"
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border bg-surface text-secondary hover:text-primary hover:bg-surface-subtle font-sans text-xs transition-colors cursor-pointer"
           >
-            <SparklesIcon size={13} />
             <span>{t('btn_automatch', undefined, lang)}</span>
           </button>
         )}

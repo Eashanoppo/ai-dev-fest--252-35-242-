@@ -3,6 +3,7 @@ import { useStore } from './store';
 import { t, formatNumber } from './i18n';
 import { TopBar } from './components/TopBar';
 import { TenderHeader } from './components/TenderHeader';
+import { ActionToolbar } from './components/ActionToolbar';
 import { UploadZone } from './components/UploadZone';
 import { FileRow } from './components/FileRow';
 import { RequirementRow } from './components/RequirementRow';
@@ -20,6 +21,7 @@ import {
 import { buildPackage, sanitizeFilename } from './lib/pdf';
 import { buildChecklistCsv } from './lib/csv';
 import { computeRequirementStatus } from './lib/status';
+import { autoMatchFiles } from './lib/match';
 import { FileIcon, AlertIcon } from './components/icons';
 
 function downloadBlob(blob: Blob, filename: string): void {
@@ -139,6 +141,30 @@ export default function App() {
 
   const handleApplyMatches = (newMatches: Record<string, string>) => {
     dispatch({ type: 'APPLY_MATCHES', payload: newMatches });
+  };
+
+  // Auto-match action
+  const handleAutoMatch = () => {
+    if (state.requirements.length === 0 || state.files.length === 0) return;
+    const suggestions = autoMatchFiles(state.requirements, state.files, state.matches);
+    if (suggestions.length === 0) {
+      notify(
+        'info',
+        'No matching files found for the remaining requirements.',
+        'অবশিষ্ট রিকোয়ারমেন্টের জন্য কোনো ম্যাচিং ফাইল পাওয়া যায়নি।'
+      );
+      return;
+    }
+    const newMatches: Record<string, string> = {};
+    for (const s of suggestions) {
+      newMatches[s.requirementId] = s.fileId;
+    }
+    dispatch({ type: 'APPLY_MATCHES', payload: newMatches });
+    notify(
+      'success',
+      t('toast_automatch_applied', { count: suggestions.length }, 'en'),
+      t('toast_automatch_applied', { count: suggestions.length }, 'bn')
+    );
   };
 
   // CSV Export Bonus Feature
@@ -294,12 +320,12 @@ export default function App() {
         className="hidden"
       />
 
-      <main className="flex-1 max-w-[1280px] w-full mx-auto p-4 sm:p-6 md:p-8 flex flex-col gap-6 pb-28">
+      <main className="flex-1 max-w-[1360px] w-full mx-auto p-4 sm:p-6 md:p-8 flex flex-col gap-6 pb-28">
         {/* Re-link Pending Matches Banner */}
         {pendingCount > 0 && (
-          <div className="p-4 rounded-xl border border-accent-steel/30 bg-accent-steel/5 flex items-center justify-between gap-4">
+          <div className="p-3.5 rounded-lg border border-accent/30 bg-accent/5 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
-              <AlertIcon size={18} className="text-accent-steel shrink-0" />
+              <AlertIcon size={16} className="text-accent shrink-0" />
               <div>
                 <h4 className="text-xs font-semibold text-primary">
                   {t('relink_banner_title', undefined, state.lang)}
@@ -330,12 +356,27 @@ export default function App() {
           onToast={notify}
         />
 
+        {/* Dedicated Action Toolbar */}
+        <ActionToolbar
+          onAutoMatch={handleAutoMatch}
+          canAutoMatch={state.requirements.length > 0 && state.files.length > 0}
+          onExportCsv={handleExportCsv}
+          hasTender={Boolean(state.tender)}
+          onOpenSealModal={() => setIsSealModalOpen(true)}
+          hasSealConfigured={Boolean(sealSettings.imageBytes)}
+          includeIndexPage={includeIndexPage}
+          onToggleIndexPage={setIncludeIndexPage}
+          onExportProject={handleExportProjectJson}
+          onImportProject={() => projectImportInputRef.current?.click()}
+          lang={state.lang}
+        />
+
         {/* Workspace: Requirements Checklist (2fr) + Files panel (1fr) */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           {/* Left: Requirements List Checklist (2fr) */}
           <section
             id="requirements-checklist-panel"
-            className="lg:col-span-2 flex flex-col gap-4 bg-surface border border-border rounded-xl p-5 shadow-xs"
+            className="lg:col-span-2 flex flex-col gap-4 bg-surface border border-border rounded-lg p-5 shadow-2xs"
           >
             <div className="flex items-center justify-between pb-3 border-b border-border">
               <div>
@@ -349,7 +390,7 @@ export default function App() {
 
               {state.requirements.length > 0 && (
                 <div className="flex items-center gap-2">
-                  <span className="text-xs font-mono px-2 py-0.5 rounded bg-subtle text-muted border border-border">
+                  <span className="text-xs font-mono px-2 py-0.5 rounded bg-surface-subtle text-muted border border-border">
                     {formatNumber(Object.keys(state.matches).length, state.lang)}/{formatNumber(state.requirements.length, state.lang)}{' '}
                     {state.lang === 'bn' ? 'ম্যাচড' : 'matched'}
                   </span>
@@ -364,7 +405,7 @@ export default function App() {
                 icon={<FileIcon size={32} />}
               />
             ) : (
-              <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-2.5">
                 {state.requirements.map((req) => {
                   const matchedFileId = state.matches[req.id];
                   const matchedFile = matchedFileId
@@ -404,7 +445,7 @@ export default function App() {
           {/* Right: Files Panel (1fr) */}
           <section
             id="uploaded-files-panel"
-            className="flex flex-col gap-4 bg-surface border border-border rounded-xl p-5 shadow-xs"
+            className="flex flex-col gap-4 bg-surface border border-border rounded-lg p-5 shadow-2xs"
           >
             <div className="flex items-center justify-between pb-3 border-b border-border">
               <div>
@@ -417,7 +458,7 @@ export default function App() {
               </div>
 
               {state.files.length > 0 && (
-                <span className="text-xs font-mono px-2 py-0.5 rounded bg-subtle text-muted border border-border">
+                <span className="text-xs font-mono px-2 py-0.5 rounded bg-surface-subtle text-muted border border-border">
                   {formatNumber(state.files.length, state.lang)}
                 </span>
               )}

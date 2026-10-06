@@ -1,7 +1,6 @@
 import React from 'react';
 import { RequirementStatusType, AppLanguage } from '../types';
 import { t } from '../i18n';
-import { CheckIcon, AlertIcon, ClockIcon } from './icons';
 
 interface StatusBadgeProps {
   status: RequirementStatusType;
@@ -15,52 +14,52 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, lang, size = '
       case 'OK':
         return {
           label: t('status_ok', undefined, lang),
-          icon: <CheckIcon size={size === 'sm' ? 14 : 16} />,
-          className:
-            'bg-[#E7F0EA] text-[#3E7A52] dark:bg-[#182019] dark:text-[#7FB793] border border-[#3E7A52]/20 dark:border-[#7FB793]/30',
+          dotColor: 'bg-emerald-500',
+          textColor: 'text-emerald-700 dark:text-emerald-400',
+          badgeBg: 'bg-emerald-50/80 dark:bg-emerald-950/30 border-emerald-200/60 dark:border-emerald-800/40',
         };
       case 'EXPIRY_NEEDED':
         return {
           label: t('status_expiry_needed', undefined, lang),
-          icon: <ClockIcon size={size === 'sm' ? 14 : 16} />,
-          className:
-            'bg-[#F2EBDC] text-[#96682B] dark:bg-[#241D10] dark:text-[#D9B36C] border border-[#96682B]/20 dark:border-[#D9B36C]/30',
+          dotColor: 'bg-amber-500',
+          textColor: 'text-amber-800 dark:text-amber-400',
+          badgeBg: 'bg-amber-50/80 dark:bg-amber-950/30 border-amber-200/60 dark:border-amber-800/40',
         };
       case 'EXPIRED':
         return {
           label: t('status_expired', undefined, lang),
-          icon: <AlertIcon size={size === 'sm' ? 14 : 16} />,
-          className:
-            'bg-[#F6E9E9] text-[#A63D40] dark:bg-[#271617] dark:text-[#D98A8C] border border-[#A63D40]/20 dark:border-[#D98A8C]/30',
+          dotColor: 'bg-rose-500',
+          textColor: 'text-rose-700 dark:text-rose-400',
+          badgeBg: 'bg-rose-50/80 dark:bg-rose-950/30 border-rose-200/60 dark:border-rose-800/40',
         };
       case 'MISSING':
         return {
           label: t('status_missing', undefined, lang),
-          icon: <AlertIcon size={size === 'sm' ? 14 : 16} />,
-          className:
-            'bg-[#F6E9E9] text-[#A63D40] dark:bg-[#271617] dark:text-[#D98A8C] border border-[#A63D40]/20 dark:border-[#D98A8C]/30',
+          dotColor: 'bg-rose-500',
+          textColor: 'text-rose-700 dark:text-rose-400',
+          badgeBg: 'bg-rose-50/80 dark:bg-rose-950/30 border-rose-200/60 dark:border-rose-800/40',
         };
       case 'NOT_PROVIDED':
       default:
         return {
           label: t('status_not_provided', undefined, lang),
-          icon: null,
-          className:
-            'bg-[#EFEFEF] text-[#6E6E70] dark:bg-[#1B1B1B] dark:text-[#9A9A9E] border border-black/10 dark:border-white/10',
+          dotColor: 'bg-neutral-400 dark:bg-neutral-500',
+          textColor: 'text-neutral-600 dark:text-neutral-400',
+          badgeBg: 'bg-neutral-100/70 dark:bg-neutral-800/40 border-neutral-200/60 dark:border-neutral-700/40',
         };
     }
   };
 
-  const { label, icon, className } = getBadgeConfig();
+  const { label, dotColor, textColor, badgeBg } = getBadgeConfig();
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 font-medium rounded px-2.5 py-0.5 tracking-tight transition-colors ${
-        size === 'sm' ? 'text-xs py-0.5 px-2' : 'text-xs'
-      } ${className}`}
+      className={`inline-flex items-center gap-1.5 font-medium rounded-md border tracking-normal transition-colors select-none ${
+        size === 'sm' ? 'text-[11px] py-0.5 px-2' : 'text-xs py-1 px-2.5'
+      } ${badgeBg} ${textColor}`}
     >
-      {icon}
-      <span>{label}</span>
+      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${dotColor}`} />
+      <span className="truncate">{label}</span>
     </span>
   );
 };
