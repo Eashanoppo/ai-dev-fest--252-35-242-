@@ -1,6 +1,6 @@
 /**
- * Core Domain Types for Tender Document Package Builder
- * Strict TypeScript without any usage of 'any'
+ * Core domain types for the Tender Document Package Builder.
+ * Strict TypeScript, no `any`.
  */
 
 export interface Tender {
@@ -25,6 +25,8 @@ export interface RequirementsPayload {
   requirements: Requirement[];
 }
 
+export type FileErrorKind = 'protected' | 'damaged';
+
 export interface UploadedFile {
   id: string;
   name: string;
@@ -32,7 +34,14 @@ export interface UploadedFile {
   hash: string;
   pageCount: number;
   valid: boolean;
+  errorKind?: FileErrorKind;
   error?: string;
+}
+
+/** Name and size are enough to re-link a saved match after a page reload. */
+export interface FileRef {
+  name: string;
+  size: number;
 }
 
 export type RequirementStatusType =
@@ -45,8 +54,6 @@ export type RequirementStatusType =
 export interface ComputedStatus {
   status: RequirementStatusType;
   isBlocking: boolean;
-  reasonEn: string;
-  reasonBn: string;
 }
 
 export interface BlockerDetail {
@@ -54,9 +61,10 @@ export interface BlockerDetail {
   requirementOrder: number;
   titleEn: string;
   titleBn: string;
+  mandatory: boolean;
   status: RequirementStatusType;
-  reasonEn: string;
-  reasonBn: string;
+  expiry: string;
+  deadline: string;
 }
 
 export interface StatusSummary {
@@ -80,6 +88,8 @@ export interface ProjectState {
   files: UploadedFile[];
   matches: Record<string, string>; // requirementId -> fileId
   expiryDates: Record<string, string>; // requirementId -> YYYY-MM-DD
+  /** Saved matches waiting for the same file to be uploaded again (name + size). */
+  pendingLinks: Record<string, FileRef>;
   lang: AppLanguage;
   theme: AppTheme;
 }
@@ -98,19 +108,37 @@ export interface AssistantMessage {
   sender: 'user' | 'assistant';
   contentEn: string;
   contentBn: string;
-  timestamp: number;
+  /** True when the model reply could not be parsed and raw text is shown. */
+  raw?: boolean;
+  /** True for a fresh reply that should be revealed progressively. */
+  reveal?: boolean;
 }
 
-export interface AssistantConfig {
-  apiKey: string;
-  model: string;
-  provider: 'groq' | 'gemini';
-}
+export type GeneratePhase =
+  | 'idle'
+  | 'validating'
+  | 'cover'
+  | 'index'
+  | 'merging'
+  | 'footers'
+  | 'done';
 
 export interface GenerateProgress {
-  phase: 'idle' | 'validating' | 'cover' | 'merging' | 'footing' | 'complete' | 'error';
-  currentDocIndex: number;
-  totalDocs: number;
-  messageEn: string;
-  messageBn: string;
+  phase: GeneratePhase;
+  current: number;
+  total: number;
+  title: string;
+  pages: number;
+}
+
+export type SealScope = 'all' | 'doc-first' | 'doc-last' | 'custom';
+export type SealCorner = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
+
+export interface SealSettings {
+  imageBytes: Uint8Array | null;
+  previewUrl: string | null;
+  scope: SealScope;
+  customPages: string;
+  corner: SealCorner;
+  sizePercent: number;
 }

@@ -1,28 +1,50 @@
-import React, { useRef } from 'react';
-import { Tender, AppLanguage, RequirementsPayload } from '../types';
-import { t, formatDate, formatNumber } from '../i18n';
+import React, { useRef, useState } from 'react';
+import { Tender, AppLanguage, RequirementsPayload, StatusSummary } from '../types';
+import { t, formatDate } from '../i18n';
 import { UploadIcon, CalendarIcon } from './icons';
-import { useToast } from './Toast';
+import { parseRequirementsJson } from '../lib/requirements';
+import { CountUp } from './CountUp';
 
 interface TenderHeaderProps {
   tender: Tender | null;
   onTenderLoaded: (payload: RequirementsPayload) => void;
   lang: AppLanguage;
+  summary: StatusSummary;
   totalFiles: number;
   matchedCount: number;
-  totalRequirements: number;
+  onToast: (type: 'info' | 'success' | 'warning' | 'error', msgEn: string, msgBn: string) => void;
 }
 
 export const TenderHeader: React.FC<TenderHeaderProps> = ({
   tender,
   onTenderLoaded,
   lang,
+  summary,
   totalFiles,
   matchedCount,
-  totalRequirements,
+  onToast,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { showToast } = useToast();
+  const [isDraggingJson, setIsDraggingJson] = useState(false);
+
+  const processJsonText = (text: string) => {
+    const result = parseRequirementsJson(text);
+    if (!result.success || !result.data) {
+      onToast(
+        'error',
+        result.error || t('toast_invalid_json', undefined, 'en'),
+        result.error || t('toast_invalid_json', undefined, 'bn')
+      );
+      return;
+    }
+
+    onTenderLoaded(result.data);
+    onToast(
+      'success',
+      t('toast_tender_loaded', { id: result.data.tender.tender_id, count: result.data.requirements.length }, 'en'),
+      t('toast_tender_loaded', { id: result.data.tender.tender_id, count: result.data.requirements.length }, 'bn')
+    );
+  };
 
   const handleJsonUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -30,72 +52,51 @@ export const TenderHeader: React.FC<TenderHeaderProps> = ({
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      try {
-        const text = event.target?.result as string;
-        const parsed = JSON.parse(text);
-
-        // Tolerant schema validation without 'any'
-        if (
-          !parsed ||
-          typeof parsed !== 'object' ||
-          !parsed.tender ||
-          typeof parsed.tender !== 'object' ||
-          !Array.isArray(parsed.requirements)
-        ) {
-          throw new Error('Missing tender or requirements fields');
-        }
-
-        const tenderObj: Tender = {
-          tender_id: String(parsed.tender.tender_id || 'T-UNSPECIFIED'),
-          title: String(parsed.tender.title || 'Untitled Tender'),
-          procuring_entity: String(parsed.tender.procuring_entity || 'N/A'),
-          bidder: String(parsed.tender.bidder || 'N/A'),
-          // Handle ISO dates with possible time parts (e.g. YYYY-MM-DDTHH:mm:ss -> YYYY-MM-DD)
-          submission_deadline: String(parsed.tender.submission_deadline || '').slice(0, 10),
-        };
-
-        const requirementsList = parsed.requirements.map((r: Record<string, unknown>, index: number) => ({
-          id: String(r.id || `R${index + 1}`),
-          order: typeof r.order === 'number' ? r.order : index + 1,
-          title_en: String(r.title_en || r.title_bn || `Document ${index + 1}`),
-          title_bn: r.title_bn ? String(r.title_bn) : undefined,
-          mandatory: Boolean(r.mandatory),
-          has_expiry: Boolean(r.has_expiry),
-        }));
-
-        onTenderLoaded({
-          tender: tenderObj,
-          requirements: requirementsList,
-        });
-
-        showToast(
-          t('toast_tender_loaded', { id: tenderObj.tender_id, count: requirementsList.length }, 'en'),
-          t('toast_tender_loaded', { id: tenderObj.tender_id, count: formatNumber(requirementsList.length, 'bn') }, 'bn'),
-          'success'
-        );
-      } catch {
-        showToast(
-          t('toast_invalid_json', undefined, 'en'),
-          t('toast_invalid_json', undefined, 'bn'),
-          'error'
-        );
-      }
+      const text = event.target?.result as string;
+      processJsonText(text);
     };
-
     reader.readAsText(file);
     e.target.value = '';
   };
 
-  // Determine active step in progress strip
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingJson(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDraggingJson(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDraggingJson(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file && (file.name.endsWith('.json') || file.type.includes('json'))) {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const text = event.target?.result as string;
+        processJsonText(text);
+      };
+      reader.readAsText(file);
+    }
+  };
+
   const hasTender = Boolean(tender);
   const hasFiles = totalFiles > 0;
   const isMatching = matchedCount > 0;
-  const isComplete = totalRequirements > 0 && matchedCount >= totalRequirements;
-
+  const isComplete = summary.canGenerate;
   const todayStr = new Date().toISOString().slice(0, 10);
 
   return (
-    <div className="bg-surface border border-border rounded p-6 shadow-xs flex flex-col gap-6">
+    <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`bg-surface border rounded-xl p-6 shadow-xs flex flex-col gap-6 transition-colors ${
+        isDraggingJson ? 'border-accent-steel ring-2 ring-accent-steel/20' : 'border-border'
+      }`}
+    >
       <input
         ref={fileInputRef}
         type="file"
@@ -105,11 +106,11 @@ export const TenderHeader: React.FC<TenderHeaderProps> = ({
         className="hidden"
       />
 
-      {/* Top row: Kicker & Action Button */}
+      {/* Top row: Kicker & Load Button */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
           <span className="kicker">TENDER SPECIFICATION & COMPLIANCE</span>
-          <h1 className="display-title text-primary mt-1">
+          <h1 className="display-title text-primary mt-1 text-xl sm:text-2xl font-bold tracking-tight">
             {tender ? tender.title : t('empty_no_tender_title', undefined, lang)}
           </h1>
         </div>
@@ -118,14 +119,14 @@ export const TenderHeader: React.FC<TenderHeaderProps> = ({
           type="button"
           id="load-requirements-json-btn"
           onClick={() => fileInputRef.current?.click()}
-          className="self-start sm:self-center inline-flex items-center gap-2 px-3.5 py-2 rounded text-xs font-medium border border-border bg-subtle text-primary hover:border-black/20 dark:hover:border-white/20 transition-colors cursor-pointer"
+          className="self-start sm:self-center inline-flex items-center gap-2 px-3.5 py-2 rounded-md text-xs font-medium border border-border bg-subtle text-primary hover:bg-surface hover:border-accent-steel transition-colors cursor-pointer shadow-2xs"
         >
           <UploadIcon size={14} />
           <span>{t('btn_load_json', undefined, lang)}</span>
         </button>
       </div>
 
-      {/* Meta Grid */}
+      {/* Tender Metadata Details */}
       {tender && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-4 pt-4 border-t border-border text-xs">
           <div>
@@ -176,7 +177,46 @@ export const TenderHeader: React.FC<TenderHeaderProps> = ({
         </div>
       )}
 
-      {/* Progress Strip: Load → Upload → Match → Verify */}
+      {/* Stat Cards with CountUp */}
+      {tender && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+          <div className="p-3 rounded-lg border border-border bg-subtle/50 flex flex-col">
+            <span className="text-[11px] text-muted mb-1">{t('stat_total_docs', undefined, lang)}</span>
+            <span className="text-lg font-bold font-mono text-primary">
+              <CountUp value={summary.total} lang={lang} />
+            </span>
+          </div>
+
+          <div className="p-3 rounded-lg border border-status-ok-border bg-status-ok-bg/40 flex flex-col">
+            <span className="text-[11px] text-status-ok-text mb-1">{t('stat_ready', undefined, lang)}</span>
+            <span className="text-lg font-bold font-mono text-status-ok-text">
+              <CountUp value={summary.ok} lang={lang} />
+            </span>
+          </div>
+
+          <div
+            className={`p-3 rounded-lg border flex flex-col ${
+              summary.blockingCount > 0
+                ? 'border-status-expired-border bg-status-expired-bg/40 text-status-expired-text'
+                : 'border-border bg-subtle/50 text-muted'
+            }`}
+          >
+            <span className="text-[11px] mb-1">{t('stat_blocking', undefined, lang)}</span>
+            <span className="text-lg font-bold font-mono">
+              <CountUp value={summary.blockingCount} lang={lang} />
+            </span>
+          </div>
+
+          <div className="p-3 rounded-lg border border-border bg-subtle/50 flex flex-col">
+            <span className="text-[11px] text-muted mb-1">{t('stat_optional_skipped', undefined, lang)}</span>
+            <span className="text-lg font-bold font-mono text-primary">
+              <CountUp value={summary.notProvided} lang={lang} />
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Progress Indicator */}
       <div className="pt-4 border-t border-border flex items-center justify-between text-xs">
         <div className="flex items-center gap-2 sm:gap-4 flex-wrap">
           <div className="flex items-center gap-1.5 font-medium">
@@ -237,19 +277,6 @@ export const TenderHeader: React.FC<TenderHeaderProps> = ({
             </span>
           </div>
         </div>
-
-        {/* Counts summary chip */}
-        {tender && (
-          <div className="hidden md:flex items-center gap-3 text-[11px] text-muted font-mono">
-            <span>
-              {formatNumber(matchedCount, lang)}/{formatNumber(totalRequirements, lang)} Matched
-            </span>
-            <span>·</span>
-            <span>
-              {formatNumber(totalFiles, lang)} Files
-            </span>
-          </div>
-        )}
       </div>
     </div>
   );

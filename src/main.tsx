@@ -5,6 +5,7 @@ import './index.css';
 import App from './App';
 import { StoreProvider, useStore } from './store';
 import { ToastProvider } from './components/Toast';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 const AppWithProviders = () => {
   const { state } = useStore();
@@ -17,10 +18,12 @@ const AppWithProviders = () => {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <MotionConfig reducedMotion="user">
-      <StoreProvider>
-        <AppWithProviders />
-      </StoreProvider>
-    </MotionConfig>
+    <ErrorBoundary>
+      <MotionConfig reducedMotion="user">
+        <StoreProvider>
+          <AppWithProviders />
+        </StoreProvider>
+      </MotionConfig>
+    </ErrorBoundary>
   </StrictMode>
 );

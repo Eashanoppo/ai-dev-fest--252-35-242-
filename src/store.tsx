@@ -1,200 +1,43 @@
-import React, { createContext, useContext, useReducer, useEffect, useRef } from 'react';
-import { ProjectState, Tender, Requirement, UploadedFile, AppLanguage, AppTheme } from './types';
+import React, {
+  createContext,
+  useContext,
+  useReducer,
+  useEffect,
+  useRef,
+  useState,
+  useCallback,
+  useMemo,
+} from 'react';
+import {
+  ProjectState,
+  StatusSummary,
+  ToastMessage,
+  ToastType,
+  AppLanguage,
+  AppTheme,
+  FileRef,
+} from './types';
+import {
+  projectReducer,
+  ProjectAction,
+  initialProjectState,
+} from './reducer';
+import { computeProjectStatusSummary } from './lib/status';
+import { computeRelinks } from './lib/relink';
 
 const STORAGE_KEY = 'tenderpack_project_state';
 const LANG_STORAGE_KEY = 'tenderpack_lang';
 const THEME_STORAGE_KEY = 'tenderpack_theme';
 
-export type Action =
-  | { type: 'SET_LANG'; payload: AppLanguage }
-  | { type: 'SET_THEME'; payload: AppTheme }
-  | { type: 'LOAD_TENDER'; payload: { tender: Tender; requirements: Requirement[] } }
-  | { type: 'ADD_FILES'; payload: UploadedFile[] }
-  | { type: 'REMOVE_FILE'; payload: string } // fileId
-  | { type: 'SET_MATCH'; payload: { requirementId: string; fileId: string } }
-  | { type: 'CLEAR_MATCH'; payload: string } // requirementId
-  | { type: 'SET_EXPIRY'; payload: { requirementId: string; date: string } }
-  | { type: 'APPLY_AUTOMATCH'; payload: Record<string, string> } // requirementId -> fileId
-  | { type: 'RESET_STATE' }
-  | { type: 'HYDRATE_STATE'; payload: Partial<ProjectState> };
-
-const getInitialLanguage = (): AppLanguage => {
-  try {
-    const saved = localStorage.getItem(LANG_STORAGE_KEY);
-    if (saved === 'en' || saved === 'bn') return saved;
-  } catch {}
-  return 'en';
-};
-
-const getInitialTheme = (): AppTheme => {
-  try {
-    const saved = localStorage.getItem(THEME_STORAGE_KEY);
-    if (saved === 'light' || saved === 'dark') return saved;
-    if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-      return 'dark';
-    }
-  } catch {}
-  return 'light';
-};
-
-const initialProjectState: ProjectState = {
-  tender: null,
-  requirements: [],
-  files: [],
-  matches: {},
-  expiryDates: {},
-  lang: getInitialLanguage(),
-  theme: getInitialTheme(),
-};
-
-function projectReducer(state: ProjectState, action: Action): ProjectState {
-  switch (action.type) {
-    case 'SET_LANG': {
-      try {
-        localStorage.setItem(LANG_STORAGE_KEY, action.payload);
-        document.documentElement.setAttribute('lang', action.payload);
-      } catch {}
-      return { ...state, lang: action.payload };
-    }
-
-    case 'SET_THEME': {
-      try {
-        localStorage.setItem(THEME_STORAGE_KEY, action.payload);
-        if (action.payload === 'dark') {
-          document.documentElement.classList.add('dark');
-        } else {
-          document.documentElement.classList.remove('dark');
-        }
-      } catch {}
-      return { ...state, theme: action.payload };
-    }
-
-    case 'LOAD_TENDER': {
-      // Requirements sorted by order
-      const sortedRequirements = [...action.payload.requirements].sort((a, b) => a.order - b.order);
-      return {
-        ...state,
-        tender: action.payload.tender,
-        requirements: sortedRequirements,
-        // Reset matches & expiries when a fresh tender is loaded
-        matches: {},
-        expiryDates: {},
-      };
-    }
-
-    case 'ADD_FILES': {
-      // Append new files while maintaining max 30 limit at ingestion
-      const existingIds = new Set(state.files.map((f) => f.id));
-      const incoming = action.payload.filter((f) => !existingIds.has(f.id));
-      return {
-        ...state,
-        files: [...state.files, ...incoming],
-      };
-    }
-
-    case 'REMOVE_FILE': {
-      const fileIdToRemove = action.payload;
-      const updatedFiles = state.files.filter((f) => f.id !== fileIdToRemove);
-
-      // Clean up matches pointing to this file
-      const updatedMatches: Record<string, string> = {};
-      const updatedExpiries: Record<string, string> = { ...state.expiryDates };
-
-      Object.entries(state.matches).forEach(([reqId, fId]) => {
-        if (fId !== fileIdToRemove) {
-          updatedMatches[reqId] = fId;
-        } else {
-          // If match cleared, clear expiry too
-          delete updatedExpiries[reqId];
-        }
-      });
-
-      return {
-        ...state,
-        files: updatedFiles,
-        matches: updatedMatches,
-        expiryDates: updatedExpiries,
-      };
-    }
-
-    case 'SET_MATCH': {
-      const { requirementId, fileId } = action.payload;
-      const updatedMatches: Record<string, string> = { ...state.matches };
-
-      // Strictly 1:1 match constraint:
-      // If this file was already matched to another requirement, remove that match
-      Object.keys(updatedMatches).forEach((reqKey) => {
-        if (updatedMatches[reqKey] === fileId && reqKey !== requirementId) {
-          delete updatedMatches[reqKey];
-        }
-      });
-
-      updatedMatches[requirementId] = fileId;
-
-      return {
-        ...state,
-        matches: updatedMatches,
-      };
-    }
-
-    case 'CLEAR_MATCH': {
-      const requirementId = action.payload;
-      const updatedMatches = { ...state.matches };
-      const updatedExpiries = { ...state.expiryDates };
-
-      delete updatedMatches[requirementId];
-      delete updatedExpiries[requirementId];
-
-      return {
-        ...state,
-        matches: updatedMatches,
-        expiryDates: updatedExpiries,
-      };
-    }
-
-    case 'SET_EXPIRY': {
-      return {
-        ...state,
-        expiryDates: {
-          ...state.expiryDates,
-          [action.payload.requirementId]: action.payload.date,
-        },
-      };
-    }
-
-    case 'APPLY_AUTOMATCH': {
-      return {
-        ...state,
-        matches: {
-          ...state.matches,
-          ...action.payload,
-        },
-      };
-    }
-
-    case 'RESET_STATE': {
-      return {
-        ...initialProjectState,
-        lang: state.lang,
-        theme: state.theme,
-      };
-    }
-
-    case 'HYDRATE_STATE': {
-      return {
-        ...state,
-        ...action.payload,
-      };
-    }
-
-    default:
-      return state;
-  }
-}
-
 interface StoreContextValue {
   state: ProjectState;
-  dispatch: React.Dispatch<Action>;
+  dispatch: React.Dispatch<ProjectAction>;
+  summary: StatusSummary;
+  toasts: ToastMessage[];
+  notify: (type: ToastType, messageEn: string, messageBn: string) => void;
+  dismissToast: (id: string) => void;
+  setLanguage: (lang: AppLanguage) => void;
+  setTheme: (theme: AppTheme) => void;
 }
 
 const StoreContext = createContext<StoreContextValue | null>(null);
@@ -209,29 +52,95 @@ export const useStore = (): StoreContextValue => {
 
 export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [state, dispatch] = useReducer(projectReducer, initialProjectState);
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const isHydratedRef = useRef(false);
 
-  // Hydrate state from localStorage on initial mount
+  const notify = useCallback((type: ToastType, messageEn: string, messageBn: string) => {
+    const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+    setToasts((prev) => [...prev, { id, type, messageEn, messageBn }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 4500);
+  }, []);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const setLanguage = useCallback((lang: AppLanguage) => {
+    try {
+      localStorage.setItem(LANG_STORAGE_KEY, lang);
+    } catch {
+      // ignore
+    }
+    dispatch({ type: 'SET_LANG', payload: lang });
+  }, []);
+
+  const setTheme = useCallback((theme: AppTheme) => {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // ignore
+    }
+    dispatch({ type: 'SET_THEME', payload: theme });
+  }, []);
+
+  // Hydrate preferences and state from localStorage
   useEffect(() => {
     try {
-      const savedRaw = localStorage.getItem(STORAGE_KEY);
-      if (savedRaw) {
-        const parsed = JSON.parse(savedRaw);
+      const savedLang = localStorage.getItem(LANG_STORAGE_KEY) as AppLanguage | null;
+      if (savedLang === 'en' || savedLang === 'bn') {
+        dispatch({ type: 'SET_LANG', payload: savedLang });
+      }
+
+      const savedTheme = localStorage.getItem(THEME_STORAGE_KEY) as AppTheme | null;
+      if (savedTheme === 'light' || savedTheme === 'dark') {
+        dispatch({ type: 'SET_THEME', payload: savedTheme });
+      } else if (
+        typeof window !== 'undefined' &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches
+      ) {
+        dispatch({ type: 'SET_THEME', payload: 'dark' });
+      }
+
+      const savedProject = localStorage.getItem(STORAGE_KEY);
+      if (savedProject) {
+        const parsed = JSON.parse(savedProject);
         if (parsed && typeof parsed === 'object') {
-          // Hydrate metadata only (raw PDF buffers are kept in runtime map)
+          // Re-hydrate metadata and pendingLinks
+          const pendingLinks: Record<string, FileRef> =
+            parsed.pendingLinks || {};
+
+          // If there were saved matches and files metadata, build pendingLinks if missing
+          if (
+            Object.keys(pendingLinks).length === 0 &&
+            parsed.matches &&
+            Array.isArray(parsed.files)
+          ) {
+            for (const [rId, fId] of Object.entries(parsed.matches)) {
+              const f = parsed.files.find((item: { id: string }) => item.id === fId);
+              if (f) {
+                pendingLinks[rId] = { name: f.name, size: f.size };
+              }
+            }
+          }
+
           dispatch({
-            type: 'HYDRATE_STATE',
+            type: 'HYDRATE',
             payload: {
               tender: parsed.tender || null,
               requirements: Array.isArray(parsed.requirements) ? parsed.requirements : [],
-              files: Array.isArray(parsed.files) ? parsed.files : [],
-              matches: parsed.matches || {},
               expiryDates: parsed.expiryDates || {},
+              pendingLinks,
+              matches: {}, // Buffer-backed files will re-link on upload
+              files: [],
             },
           });
         }
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
     isHydratedRef.current = true;
   }, []);
 
@@ -248,7 +157,30 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     document.documentElement.setAttribute('lang', state.lang);
   }, [state.lang]);
 
-  // Debounced autosave metadata to localStorage
+  // Check for automatic re-linking when files change and pending links exist
+  useEffect(() => {
+    if (!isHydratedRef.current) return;
+    const pendingCount = Object.keys(state.pendingLinks).length;
+    if (pendingCount > 0 && state.files.length > 0) {
+      const relink = computeRelinks(state.pendingLinks, state.files, state.matches);
+      if (relink.resolvedCount > 0) {
+        dispatch({
+          type: 'APPLY_RELINKS',
+          payload: {
+            newMatches: relink.newMatches,
+            remainingPending: relink.remainingPending,
+          },
+        });
+        notify(
+          'info',
+          `Restored ${relink.resolvedCount} document ${relink.resolvedCount === 1 ? 'match' : 'matches'} from saved session.`,
+          `পূর্ববর্তী সেশন থেকে ${relink.resolvedCount}টি ডকুমেন্টের ম্যাচ সফলভাবে পুনঃস্থাপন করা হয়েছে।`
+        );
+      }
+    }
+  }, [state.files, state.pendingLinks, state.matches, notify]);
+
+  // Debounced autosave of project metadata (excluding binary buffers)
   useEffect(() => {
     if (!isHydratedRef.current) return;
     const timer = setTimeout(() => {
@@ -256,24 +188,44 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const metadataOnly = {
           tender: state.tender,
           requirements: state.requirements,
-          files: state.files.map((f) => ({
-            id: f.id,
-            name: f.name,
-            size: f.size,
-            hash: f.hash,
-            pageCount: f.pageCount,
-            valid: f.valid,
-            error: f.error,
-          })),
           matches: state.matches,
           expiryDates: state.expiryDates,
+          pendingLinks: state.pendingLinks,
         };
         localStorage.setItem(STORAGE_KEY, JSON.stringify(metadataOnly));
-      } catch {}
+      } catch {
+        // ignore
+      }
     }, 400);
 
     return () => clearTimeout(timer);
-  }, [state.tender, state.requirements, state.files, state.matches, state.expiryDates]);
+  }, [state.tender, state.requirements, state.matches, state.expiryDates, state.pendingLinks]);
 
-  return <StoreContext.Provider value={{ state, dispatch }}>{children}</StoreContext.Provider>;
+  // Compute live project status summary
+  const summary = useMemo(() => {
+    return computeProjectStatusSummary(
+      state.requirements,
+      state.files,
+      state.matches,
+      state.expiryDates,
+      state.tender?.submission_deadline || ''
+    );
+  }, [state.requirements, state.files, state.matches, state.expiryDates, state.tender]);
+
+  return (
+    <StoreContext.Provider
+      value={{
+        state,
+        dispatch,
+        summary,
+        toasts,
+        notify,
+        dismissToast,
+        setLanguage,
+        setTheme,
+      }}
+    >
+      {children}
+    </StoreContext.Provider>
+  );
 };

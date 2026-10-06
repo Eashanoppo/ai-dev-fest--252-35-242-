@@ -1,14 +1,19 @@
 import React, { useRef, useState, useCallback } from 'react';
-import { UploadedFile, AppLanguage } from '../types';
+import { UploadedFile, AppLanguage, Requirement } from '../types';
 import { t, formatNumber } from '../i18n';
 import { computeSHA256 } from '../lib/hash';
-import { inspectPdf, storeFileBuffer } from '../lib/pdf';
-import { useToast } from './Toast';
-import { UploadIcon } from './icons';
+import { inspectPdf } from '../lib/pdfInspect';
+import { setFileBuffer } from '../lib/fileStore';
+import { autoMatchFiles } from '../lib/match';
+import { UploadIcon, SparklesIcon } from './icons';
 
 interface UploadZoneProps {
   currentFiles: UploadedFile[];
+  requirements: Requirement[];
+  matches: Record<string, string>;
   onFilesAdded: (files: UploadedFile[]) => void;
+  onApplyMatches: (matches: Record<string, string>) => void;
+  onToast: (type: 'info' | 'success' | 'warning' | 'error', msgEn: string, msgBn: string) => void;
   lang: AppLanguage;
 }
 
@@ -17,13 +22,16 @@ const MAX_TOTAL_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
 
 export const UploadZone: React.FC<UploadZoneProps> = ({
   currentFiles,
+  requirements,
+  matches,
   onFilesAdded,
+  onApplyMatches,
+  onToast,
   lang,
 }) => {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { showToast } = useToast();
 
   const currentCount = currentFiles.length;
   const currentSizeBytes = currentFiles.reduce((acc, f) => acc + f.size, 0);
@@ -34,23 +42,23 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
       const filesArray = Array.from(fileList);
       if (filesArray.length === 0) return;
 
-      // 1. Check count limit
+      // 1. Check count limit (TC 1.5)
       if (currentCount + filesArray.length > MAX_FILES) {
-        showToast(
+        onToast(
+          'error',
           `Cannot upload ${filesArray.length} files. Exceeds maximum limit of ${MAX_FILES} files.`,
-          `সর্বোচ্চ ${formatNumber(MAX_FILES, 'bn')}টি ফাইলের সীমা অতিক্রম হয়েছে।`,
-          'error'
+          `সর্বোচ্চ ${formatNumber(MAX_FILES, 'bn')}টি ফাইলের সীমা অতিক্রম হয়েছে।`
         );
         return;
       }
 
-      // 2. Check total size limit
+      // 2. Check total size limit (TC 1.5)
       const incomingBytes = filesArray.reduce((acc, f) => acc + f.size, 0);
       if (currentSizeBytes + incomingBytes > MAX_TOTAL_SIZE_BYTES) {
-        showToast(
+        onToast(
+          'error',
           `Total upload size exceeds 50MB limit (Incoming: ${(incomingBytes / (1024 * 1024)).toFixed(1)}MB).`,
-          `ফাইলের মোট আকার ৫০ মেগাবাইটের বেশি হতে পারবে না।`,
-          'error'
+          `ফাইলের মোট আকার ৫০ মেগাবাইটের বেশি হতে পারবে না।`
         );
         return;
       }
@@ -65,21 +73,22 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           // Inspect PDF magic bytes and parse structure
           const inspectResult = await inspectPdf(buffer);
 
-          if (!inspectResult.valid && inspectResult.error?.includes('missing %PDF')) {
-            showToast(
+          // TC 1.2: If magic %PDF is missing, reject completely
+          if (!inspectResult.valid && inspectResult.errorKind === 'damaged' && inspectResult.error?.includes('missing %PDF')) {
+            onToast(
+              'error',
               t('toast_non_pdf_rejected', { name: file.name }, 'en'),
-              t('toast_non_pdf_rejected', { name: file.name }, 'bn'),
-              'error'
+              t('toast_non_pdf_rejected', { name: file.name }, 'bn')
             );
-            continue; // Skip non-PDFs entirely
+            continue;
           }
 
           // Calculate SHA-256 hash
           const hash = await computeSHA256(buffer);
           const fileId = `file-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-          // Store raw ArrayBuffer in memory (cloned for longevity)
-          storeFileBuffer(fileId, buffer.slice(0));
+          // Store buffer in memory store
+          setFileBuffer(fileId, buffer.slice(0));
 
           const uploadedFile: UploadedFile = {
             id: fileId,
@@ -88,24 +97,26 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             hash,
             pageCount: inspectResult.pageCount,
             valid: inspectResult.valid,
+            errorKind: inspectResult.errorKind,
             error: inspectResult.error,
           };
 
+          // TC 1.4: Corrupted or password-protected PDF
           if (!inspectResult.valid) {
-            showToast(
+            onToast(
+              'warning',
               t('toast_file_unreadable', { name: file.name }, 'en'),
-              t('toast_file_unreadable', { name: file.name }, 'bn'),
-              'warning'
+              t('toast_file_unreadable', { name: file.name }, 'bn')
             );
           }
 
           newUploadedFiles.push(uploadedFile);
         } catch (err) {
           const errMsg = err instanceof Error ? err.message : 'Upload error';
-          showToast(
+          onToast(
+            'error',
             `Failed to process "${file.name}": ${errMsg}`,
-            `"${file.name}" প্রক্রিয়া করতে সমস্যা হয়েছে: ${errMsg}`,
-            'error'
+            `"${file.name}" প্রক্রিয়া করতে সমস্যা হয়েছে: ${errMsg}`
           );
         }
       }
@@ -116,7 +127,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
         onFilesAdded(newUploadedFiles);
       }
     },
-    [currentCount, currentSizeBytes, onFilesAdded, showToast]
+    [currentCount, currentSizeBytes, onFilesAdded, onToast]
   );
 
   const handleDragOver = (e: React.DragEvent) => {
@@ -143,23 +154,47 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
   const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       processFiles(e.target.files);
-      // Reset input value so re-selecting the same file triggers change
       e.target.value = '';
     }
   };
 
+  const handleAutoMatch = () => {
+    if (currentFiles.length === 0 || requirements.length === 0) return;
+    const suggestions = autoMatchFiles(requirements, currentFiles, matches);
+    if (suggestions.length === 0) {
+      onToast(
+        'info',
+        'No matching files found for the remaining requirements.',
+        'অবশিষ্ট রিকোয়ারমেন্টের জন্য কোনো ম্যাচিং ফাইল পাওয়া যায়নি।'
+      );
+      return;
+    }
+
+    const newMatches: Record<string, string> = {};
+    for (const s of suggestions) {
+      newMatches[s.requirementId] = s.fileId;
+    }
+
+    onApplyMatches(newMatches);
+    onToast(
+      'success',
+      t('toast_automatch_applied', { count: suggestions.length }, 'en'),
+      t('toast_automatch_applied', { count: suggestions.length }, 'bn')
+    );
+  };
+
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       <div
         id="pdf-upload-dropzone"
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`border-[1.5px] border-dashed rounded p-6 text-center cursor-pointer transition-all duration-150 flex flex-col items-center justify-center gap-2 ${
+        className={`border-[1.5px] border-dashed rounded-xl p-6 text-center cursor-pointer transition-all duration-150 flex flex-col items-center justify-center gap-2 ${
           isDragOver
-            ? 'border-primary bg-subtle'
-            : 'border-border bg-surface hover:border-black/30 dark:hover:border-white/30'
+            ? 'border-accent-steel bg-subtle'
+            : 'border-border bg-surface hover:border-accent-steel/60'
         } ${isProcessing ? 'opacity-60 pointer-events-none' : ''}`}
         role="button"
         tabIndex={0}
@@ -176,7 +211,7 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
           disabled={isProcessing}
         />
 
-        <div className="p-2 rounded-full bg-subtle text-muted">
+        <div className="p-2.5 rounded-full bg-subtle text-muted">
           <UploadIcon size={22} />
         </div>
 
@@ -205,7 +240,18 @@ export const UploadZone: React.FC<UploadZoneProps> = ({
             lang
           )}
         </span>
-        <span>≤30 PDFs · ≤50MB</span>
+
+        {currentFiles.length > 0 && requirements.length > 0 && (
+          <button
+            type="button"
+            id="auto-match-btn"
+            onClick={handleAutoMatch}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-accent-steel/10 hover:bg-accent-steel/20 text-accent-steel font-medium font-sans text-xs transition-colors cursor-pointer"
+          >
+            <SparklesIcon size={13} />
+            <span>{t('btn_automatch', undefined, lang)}</span>
+          </button>
+        )}
       </div>
     </div>
   );

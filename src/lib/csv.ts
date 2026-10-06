@@ -1,73 +1,90 @@
 import { Requirement, UploadedFile, AppLanguage } from '../types';
-import { computeRequirementStatus } from './status';
+import { resolveMatchedFile, computeRequirementStatus } from './status';
 
 /**
- * Export checklist as a RFC-4180 compliant CSV file with UTF-8 BOM
- * Columns: Document, File, Pages, Expiry, Status
+ * Escapes CSV values and neutralizes Excel formula injection (=, +, -, @)
  */
-export function exportChecklistCsv(
+function escapeCsvCell(val: string | number | undefined | null): string {
+  if (val === undefined || val === null) return '""';
+  let str = String(val).trim();
+
+  // Protect against formula injection in Excel/Sheets
+  if (/^[=+\-@]/.test(str)) {
+    str = `'${str}`;
+  }
+
+  // Double up any quotes
+  const escaped = str.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
+
+export function buildChecklistCsv(
   requirements: Requirement[],
   files: UploadedFile[],
   matches: Record<string, string>,
   expiryDates: Record<string, string>,
   deadline: string,
-  tenderId: string,
   lang: AppLanguage = 'en'
-): void {
-  const fileMap = new Map<string, UploadedFile>();
-  files.forEach((f) => fileMap.set(f.id, f));
+): string {
+  const isBn = lang === 'bn';
 
-  const headers = [
-    lang === 'bn' ? 'ডকুমেন্ট' : 'Document',
-    lang === 'bn' ? 'ফাইল নাম' : 'File Name',
-    lang === 'bn' ? 'পৃষ্ঠা সংখ্যা' : 'Pages',
-    lang === 'bn' ? 'মেয়াদের তারিখ' : 'Expiry Date',
-    lang === 'bn' ? 'স্ট্যাটাস' : 'Status',
-  ];
+  const headers = isBn
+    ? ['ক্রম', 'আইডি', 'নথির নাম', 'বাধ্যতামূলক', 'সংযুক্ত ফাইল', 'পৃষ্ঠা সংখ্যা', 'মেয়াদ শেষের তারিখ', 'অবস্থা']
+    : ['Order', 'ID', 'Document Title', 'Mandatory', 'Matched File', 'Pages', 'Expiry Date', 'Status'];
 
-  const rows: string[][] = [headers];
+  const rows: string[] = [headers.map(escapeCsvCell).join(',')];
 
-  const sorted = [...requirements].sort((a, b) => a.order - b.order);
-
-  sorted.forEach((req) => {
-    const matchedFileId = matches[req.id];
-    const file = matchedFileId ? fileMap.get(matchedFileId) : undefined;
+  for (const req of requirements) {
+    const file = resolveMatchedFile(req.id, files, matches);
     const expiry = expiryDates[req.id] || '';
-    const status = computeRequirementStatus(req, file, expiry, deadline);
+    const computed = computeRequirementStatus(req, file, expiry, deadline);
 
-    const docTitle =
-      lang === 'bn' && req.title_bn
-        ? `${req.id}. ${req.title_bn}`
-        : `${req.id}. ${req.title_en}`;
+    const title = isBn ? req.title_bn || req.title_en : req.title_en;
+    const mandatoryStr = req.mandatory
+      ? isBn ? 'হ্যাঁ' : 'Yes'
+      : isBn ? 'না' : 'No';
 
-    const fileName = file ? file.name : (lang === 'bn' ? 'প্রদান করা হয়নি' : 'Not provided');
-    const pages = file ? String(file.pageCount) : '-';
-    const expDate = req.has_expiry ? (expiry || (lang === 'bn' ? 'প্রয়োজন' : 'Needed')) : '-';
-    const statusText = status.status;
+    const fileName = file ? file.name : (isBn ? 'সংযুক্ত করা হয়নি' : 'Not attached');
+    const pages = file ? file.pageCount : 0;
+    const expiryDisplay = req.has_expiry
+      ? expiry || (isBn ? 'প্রয়োজন' : 'Needed')
+      : (isBn ? 'প্রযোজ্য নয়' : 'N/A');
 
-    rows.push([docTitle, fileName, pages, expDate, statusText]);
-  });
+    let statusDisplay: string = computed.status;
+    if (isBn) {
+      switch (computed.status) {
+        case 'OK':
+          statusDisplay = 'ঠিক আছে';
+          break;
+        case 'MISSING':
+          statusDisplay = 'অনুপস্থিত';
+          break;
+        case 'EXPIRY_NEEDED':
+          statusDisplay = 'মেয়াদ শেষের তারিখ প্রয়োজন';
+          break;
+        case 'EXPIRED':
+          statusDisplay = 'মেয়াদোত্তীর্ণ';
+          break;
+        case 'NOT_PROVIDED':
+          statusDisplay = 'প্রদান করা হয়নি';
+          break;
+      }
+    }
 
-  // Convert to CSV with escaping
-  const csvContent = rows
-    .map((row) =>
-      row
-        .map((cell) => {
-          const escaped = cell.replace(/"/g, '""');
-          return `"${escaped}"`;
-        })
-        .join(',')
-    )
-    .join('\r\n');
+    const row = [
+      escapeCsvCell(req.order),
+      escapeCsvCell(req.id),
+      escapeCsvCell(title),
+      escapeCsvCell(mandatoryStr),
+      escapeCsvCell(fileName),
+      escapeCsvCell(pages),
+      escapeCsvCell(expiryDisplay),
+      escapeCsvCell(statusDisplay),
+    ];
 
-  // Add UTF-8 BOM (\uFEFF) for proper Bengali character rendering in Excel
-  const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `${tenderId || 'Tender'}_Checklist.csv`;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+    rows.push(row.join(','));
+  }
+
+  // Prepend UTF-8 BOM (\uFEFF) so Excel opens UTF-8/Bangla properly without encoding corruption
+  return '\uFEFF' + rows.join('\r\n');
 }

@@ -8,6 +8,8 @@ interface RequirementRowProps {
   requirement: Requirement;
   matchedFile: UploadedFile | undefined;
   availableFiles: UploadedFile[];
+  currentMatches: Record<string, string>;
+  allFiles: UploadedFile[];
   computedStatus: ComputedStatus;
   expiryDate: string;
   onMatchChange: (requirementId: string, fileId: string) => void;
@@ -20,6 +22,8 @@ export const RequirementRow: React.FC<RequirementRowProps> = ({
   requirement,
   matchedFile,
   availableFiles,
+  currentMatches,
+  allFiles,
   computedStatus,
   expiryDate,
   onMatchChange,
@@ -35,10 +39,19 @@ export const RequirementRow: React.FC<RequirementRowProps> = ({
     ? [matchedFile, ...availableFiles.filter((f) => f.id !== matchedFile.id)]
     : availableFiles;
 
+  // Track hashes matched to other requirements to flag duplicate conflicts (TC 2.3)
+  const matchedOtherHashes = new Set<string>();
+  for (const [rId, fId] of Object.entries(currentMatches)) {
+    if (rId !== requirement.id) {
+      const f = allFiles.find((file) => file.id === fId);
+      if (f) matchedOtherHashes.add(f.hash);
+    }
+  }
+
   return (
     <div
       id={`requirement-row-${requirement.id}`}
-      className="p-4 rounded border border-border bg-surface flex flex-col gap-3 transition-colors hover:border-black/20 dark:hover:border-white/20"
+      className="p-4 rounded-xl border border-border bg-surface flex flex-col gap-3 transition-colors hover:border-accent-steel/50 shadow-2xs"
     >
       {/* Top line: Order Number, Title, Mandatory Tag, Status Badge */}
       <div className="flex items-start justify-between gap-3">
@@ -50,13 +63,13 @@ export const RequirementRow: React.FC<RequirementRowProps> = ({
 
           <div className="flex flex-col min-w-0 flex-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-medium text-sm text-primary tracking-tight">
+              <span className="font-semibold text-sm text-primary tracking-tight">
                 {title}
               </span>
 
               {/* Mandatory / Optional Tag */}
               <span
-                className={`text-[10px] font-medium px-1.5 py-0.2 rounded border ${
+                className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${
                   requirement.mandatory
                     ? 'border-[#A63D40]/30 text-[#A63D40] dark:text-[#D98A8C] bg-[#F6E9E9]/40 dark:bg-[#271617]/40'
                     : 'border-border text-muted bg-subtle'
@@ -98,18 +111,25 @@ export const RequirementRow: React.FC<RequirementRowProps> = ({
                 onUnmatch(requirement.id);
               }
             }}
-            className="w-full text-xs py-1.5 px-2.5 rounded border border-border bg-subtle text-primary focus:outline-hidden focus:ring-1 focus:ring-accent-steel cursor-pointer transition-colors"
+            className="w-full text-xs py-1.5 px-2.5 rounded-md border border-border bg-subtle text-primary focus:outline-hidden focus:ring-1 focus:ring-accent-steel cursor-pointer transition-colors"
           >
             <option value="">{t('select_file_placeholder', undefined, lang)}</option>
-            {selectableFiles.map((file) => (
-              <option key={file.id} value={file.id}>
-                {file.name} ({formatNumber(file.pageCount, lang)}{' '}
-                {file.pageCount === 1
-                  ? t('page_singular', undefined, lang)
-                  : t('page_plural', undefined, lang)}
-                )
-              </option>
-            ))}
+            {selectableFiles.map((file) => {
+              const isDuplicateConflict = matchedOtherHashes.has(file.hash);
+              return (
+                <option
+                  key={file.id}
+                  value={file.id}
+                  disabled={isDuplicateConflict}
+                >
+                  {file.name} ({formatNumber(file.pageCount, lang)}{' '}
+                  {file.pageCount === 1
+                    ? t('page_singular', undefined, lang)
+                    : t('page_plural', undefined, lang)}
+                  ){isDuplicateConflict ? (lang === 'bn' ? ' — [ডুপ্লিকেট দ্বন্দ্ব]' : ' — [Duplicate Conflict]') : ''}
+                </option>
+              );
+            })}
           </select>
         </div>
 
@@ -144,7 +164,7 @@ export const RequirementRow: React.FC<RequirementRowProps> = ({
               id={`expiry-input-${requirement.id}`}
               value={expiryDate || ''}
               onChange={(e) => onExpiryChange(requirement.id, e.target.value)}
-              className="text-xs py-1 px-2 rounded border border-border bg-subtle text-primary font-mono focus:outline-hidden focus:ring-1 focus:ring-accent-steel cursor-pointer"
+              className="text-xs py-1 px-2 rounded-md border border-border bg-subtle text-primary font-mono focus:outline-hidden focus:ring-1 focus:ring-accent-steel cursor-pointer"
               aria-label={t('expiry_date_label', undefined, lang)}
             />
           </div>

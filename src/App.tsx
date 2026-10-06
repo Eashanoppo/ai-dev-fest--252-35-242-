@@ -10,26 +10,38 @@ import { GenerateBar } from './components/GenerateBar';
 import { EmptyState } from './components/EmptyState';
 import { AssistantDrawer } from './components/AssistantDrawer';
 import { SettingsModal } from './components/SettingsModal';
-import { SealModal, SealSettings } from './components/SealModal';
-import { useToast } from './components/Toast';
-import { UploadedFile, RequirementsPayload, GenerateProgress } from './types';
-import { removeFileBuffer, buildPackage, downloadPdfBlob, sanitizeFilename } from './lib/pdf';
+import { SealModal } from './components/SealModal';
 import {
-  isFileDuplicate,
-  getSiblingDuplicateNames,
-  checkDuplicateMatchConflict,
-  computeAutoMatches,
-} from './lib/match';
-import {
-  computeRequirementStatus,
-  computeProjectStatusSummary,
-} from './lib/status';
-import { exportChecklistCsv } from './lib/csv';
-import { FileIcon, DownloadIcon } from './components/icons';
+  UploadedFile,
+  RequirementsPayload,
+  GenerateProgress,
+  SealSettings,
+} from './types';
+import { buildPackage, sanitizeFilename } from './lib/pdf';
+import { buildChecklistCsv } from './lib/csv';
+import { computeRequirementStatus } from './lib/status';
+import { FileIcon, AlertIcon } from './components/icons';
+
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 export default function App() {
-  const { state, dispatch } = useStore();
-  const { showToast } = useToast();
+  const {
+    state,
+    dispatch,
+    summary,
+    notify,
+    setLanguage,
+    setTheme,
+  } = useStore();
 
   // Modal / Drawer state
   const [isAssistantOpen, setIsAssistantOpen] = useState(false);
@@ -42,10 +54,11 @@ export default function App() {
   // Bonus: Seal stamp settings
   const [sealSettings, setSealSettings] = useState<SealSettings>({
     imageBytes: null,
-    imagePreviewUrl: null,
+    previewUrl: null,
     scope: 'all',
+    customPages: '',
     corner: 'bottom-right',
-    sizePercent: 60,
+    sizePercent: 20,
   });
 
   // Package generation state
@@ -55,25 +68,13 @@ export default function App() {
   const [lastGeneratedFilename, setLastGeneratedFilename] = useState<string>('');
   const [generateProgress, setGenerateProgress] = useState<GenerateProgress>({
     phase: 'idle',
-    currentDocIndex: 0,
-    totalDocs: 0,
-    messageEn: '',
-    messageBn: '',
+    current: 0,
+    total: 100,
+    title: '',
+    pages: 0,
   });
 
   const projectImportInputRef = useRef<HTMLInputElement>(null);
-
-  const handleLanguageChange = (newLang: 'en' | 'bn') => {
-    dispatch({ type: 'SET_LANG', payload: newLang });
-  };
-
-  const handleThemeToggle = () => {
-    dispatch({ type: 'SET_THEME', payload: state.theme === 'dark' ? 'light' : 'dark' });
-  };
-
-  const handleAssistantToggle = () => {
-    setIsAssistantOpen((prev) => !prev);
-  };
 
   const handleTenderLoaded = (payload: RequirementsPayload) => {
     dispatch({ type: 'LOAD_TENDER', payload });
@@ -84,7 +85,6 @@ export default function App() {
   };
 
   const handleFileRemove = (fileId: string) => {
-    removeFileBuffer(fileId);
     dispatch({ type: 'REMOVE_FILE', payload: fileId });
   };
 
@@ -98,6 +98,17 @@ export default function App() {
     return state.files.filter((f) => f.valid && !matchedFileIds.has(f.id));
   }, [state.files, matchedFileIds]);
 
+  // Duplicate files hashing index (TC 2.2)
+  const hashCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const f of state.files) {
+      if (f.hash) {
+        counts.set(f.hash, (counts.get(f.hash) || 0) + 1);
+      }
+    }
+    return counts;
+  }, [state.files]);
+
   // Map of matched requirements for files
   const fileToRequirementMap = useMemo(() => {
     const map = new Map<string, string>();
@@ -107,26 +118,8 @@ export default function App() {
     return map;
   }, [state.matches]);
 
-  // Handle matching file to requirement with duplicate conflict guard
+  // Handle matching file to requirement
   const handleMatchChange = (requirementId: string, fileId: string) => {
-    const conflictCheck = checkDuplicateMatchConflict(
-      fileId,
-      requirementId,
-      state.files,
-      state.matches
-    );
-
-    if (!conflictCheck.allowed) {
-      const fileObj = state.files.find((f) => f.id === fileId);
-      const fileName = fileObj?.name || 'File';
-      showToast(
-        t('toast_duplicate_blocked', { name: fileName }, 'en'),
-        t('toast_duplicate_blocked', { name: fileName }, 'bn'),
-        'warning'
-      );
-      return;
-    }
-
     dispatch({
       type: 'SET_MATCH',
       payload: { requirementId, fileId },
@@ -137,134 +130,78 @@ export default function App() {
     dispatch({ type: 'CLEAR_MATCH', payload: requirementId });
   };
 
-  const handleExpiryChange = (requirementId: string, date: string) => {
+  const handleExpiryChange = (requirementId: string, expiry: string) => {
     dispatch({
       type: 'SET_EXPIRY',
-      payload: { requirementId, date },
+      payload: { requirementId, expiry },
     });
   };
 
-  // Auto-Match Bonus Feature
-  const handleAutoMatch = () => {
-    const suggestions = computeAutoMatches(
-      state.requirements,
-      state.files,
-      state.matches
-    );
-
-    const matchCount = Object.keys(suggestions).length;
-    if (matchCount > 0) {
-      dispatch({ type: 'APPLY_AUTOMATCH', payload: suggestions });
-      showToast(
-        t('toast_automatch_applied', { count: matchCount }, 'en'),
-        t('toast_automatch_applied', { count: formatNumber(matchCount, 'bn') }, 'bn'),
-        'success'
-      );
-    } else {
-      showToast(
-        'No new automatic document matches found.',
-        'নতুন কোনো মিল পাওয়া যায়নি।',
-        'info'
-      );
-    }
+  const handleApplyMatches = (newMatches: Record<string, string>) => {
+    dispatch({ type: 'APPLY_MATCHES', payload: newMatches });
   };
 
   // CSV Export Bonus Feature
   const handleExportCsv = () => {
     if (!state.tender) {
-      showToast('Please load a tender first.', 'অনুগ্রহ করে প্রথমে টেন্ডার লোড করুন।', 'warning');
+      notify('warning', 'Please load a tender first.', 'অনুগ্রহ করে প্রথমে একটি টেন্ডার লোড করুন।');
       return;
     }
 
-    exportChecklistCsv(
+    const csvContent = buildChecklistCsv(
       state.requirements,
       state.files,
       state.matches,
       state.expiryDates,
       state.tender.submission_deadline,
-      state.tender.tender_id,
       state.lang
     );
 
-    showToast(
-      t('toast_csv_exported', undefined, 'en'),
-      t('toast_csv_exported', undefined, 'bn'),
-      'success'
-    );
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const filename = `${sanitizeFilename(state.tender.tender_id).replace('_Package.pdf', '')}_Checklist.csv`;
+    downloadBlob(blob, filename);
+
+    notify('success', t('toast_csv_exported', undefined, 'en'), t('toast_csv_exported', undefined, 'bn'));
   };
-
-  // Recompute live project status summary on every state change
-  const deadline = state.tender?.submission_deadline || '';
-  const statusSummary = useMemo(() => {
-    return computeProjectStatusSummary(
-      state.requirements,
-      state.files,
-      state.matches,
-      state.expiryDates,
-      deadline
-    );
-  }, [state.requirements, state.files, state.matches, state.expiryDates, deadline]);
-
-  const matchedCount = Object.keys(state.matches).length;
 
   // Real PDF Package Builder & Downloader
   const handleGenerateClick = async () => {
-    if (!statusSummary.canGenerate || !state.tender) return;
+    if (!summary.canGenerate || !state.tender) return;
 
     setIsGenerating(true);
     setGenerateProgress({
       phase: 'validating',
-      currentDocIndex: 0,
-      totalDocs: state.requirements.length,
-      messageEn: 'Validating package components...',
-      messageBn: 'প্যাকেজের উপাদানসমূহ যাচাই করা হচ্ছে...',
+      current: 0,
+      total: 100,
+      title: 'Validating documents...',
+      pages: 0,
     });
 
     try {
-      showToast(
-        t('toast_pdf_generating', undefined, 'en'),
-        t('toast_pdf_generating', undefined, 'bn'),
-        'info'
-      );
+      notify('info', t('toast_pdf_generating', undefined, 'en'), t('toast_pdf_generating', undefined, 'bn'));
 
-      const result = await buildPackage(
-        state.tender,
-        state.requirements,
-        state.files,
-        state.matches,
-        {
-          includeIndexPage,
-          sealImageBytes: sealSettings.imageBytes || undefined,
-          sealPlacement: sealSettings.imageBytes
-            ? {
-                scope: sealSettings.scope,
-                corner: sealSettings.corner,
-                sizePercent: sealSettings.sizePercent,
-              }
-            : undefined,
-          onProgress: (prog) => setGenerateProgress(prog),
-        }
-      );
+      const result = await buildPackage({
+        tender: state.tender,
+        requirements: state.requirements,
+        files: state.files,
+        matches: state.matches,
+        includeIndexPage,
+        seal: sealSettings.imageBytes ? sealSettings : null,
+        onProgress: (prog) => setGenerateProgress(prog),
+      });
 
       setLastGeneratedBytes(result.pdfBytes);
       setLastGeneratedFilename(result.filename);
       setHasGeneratedPackage(true);
 
-      // Trigger instant download via Blob
-      downloadPdfBlob(result.pdfBytes, result.filename);
+      // Trigger instant download via Blob (Section 4.8 / TC 4.7)
+      const blob = new Blob([new Uint8Array(result.pdfBytes)], { type: 'application/pdf' });
+      downloadBlob(blob, result.filename);
 
-      showToast(
-        t('toast_pdf_success', undefined, 'en'),
-        t('toast_pdf_success', undefined, 'bn'),
-        'success'
-      );
+      notify('success', t('toast_pdf_success', undefined, 'en'), t('toast_pdf_success', undefined, 'bn'));
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Unknown generation error';
-      showToast(
-        t('toast_pdf_error', { error: errMsg }, 'en'),
-        t('toast_pdf_error', { error: errMsg }, 'bn'),
-        'error'
-      );
+      notify('error', t('toast_pdf_error', { error: errMsg }, 'en'), t('toast_pdf_error', { error: errMsg }, 'bn'));
     } finally {
       setIsGenerating(false);
     }
@@ -272,28 +209,26 @@ export default function App() {
 
   const handleDownloadLastGenerated = () => {
     if (lastGeneratedBytes && lastGeneratedFilename) {
-      downloadPdfBlob(lastGeneratedBytes, lastGeneratedFilename);
+      const blob = new Blob([new Uint8Array(lastGeneratedBytes)], { type: 'application/pdf' });
+      downloadBlob(blob, lastGeneratedFilename);
     }
   };
 
   // Project Backup (Export JSON)
   const handleExportProjectJson = () => {
+    if (!state.tender) return;
     const backupData = {
       tender: state.tender,
       requirements: state.requirements,
       matches: state.matches,
       expiryDates: state.expiryDates,
+      pendingLinks: state.pendingLinks,
       includeIndexPage,
       exportedAt: new Date().toISOString(),
     };
-    const jsonStr = JSON.stringify(backupData, null, 2);
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${sanitizeFilename(state.tender?.tender_id || 'Tender')}_Project.json`;
-    a.click();
-    URL.revokeObjectURL(a.href);
+    const blob = new Blob([JSON.stringify(backupData, null, 2)], { type: 'application/json' });
+    const filename = `${sanitizeFilename(state.tender.tender_id).replace('_Package.pdf', '')}_Project.json`;
+    downloadBlob(blob, filename);
   };
 
   // Project Restore (Import JSON)
@@ -312,25 +247,28 @@ export default function App() {
             payload: { tender: parsed.tender, requirements: parsed.requirements },
           });
           if (parsed.matches) {
-            dispatch({ type: 'APPLY_AUTOMATCH', payload: parsed.matches });
+            dispatch({ type: 'APPLY_MATCHES', payload: parsed.matches });
           }
           if (parsed.expiryDates) {
             Object.entries(parsed.expiryDates).forEach(([rId, date]) => {
-              dispatch({ type: 'SET_EXPIRY', payload: { requirementId: rId, date: String(date) } });
+              dispatch({ type: 'SET_EXPIRY', payload: { requirementId: rId, expiry: String(date) } });
             });
           }
           if (typeof parsed.includeIndexPage === 'boolean') {
             setIncludeIndexPage(parsed.includeIndexPage);
           }
-          showToast('Project restored successfully.', 'প্রকল্প পুনরুদ্ধার সফল হয়েছে।', 'success');
+          notify('success', 'Project restored successfully.', 'প্রকল্প পুনরুদ্ধার সফল হয়েছে।');
         }
       } catch {
-        showToast('Invalid project backup file.', 'অকার্যকর ব্যাকআপ ফাইল।', 'error');
+        notify('error', 'Invalid project backup file.', 'অকার্যকর ব্যাকআপ ফাইল।');
       }
     };
     reader.readAsText(file);
     e.target.value = '';
   };
+
+  const pendingCount = Object.keys(state.pendingLinks).length;
+  const deadline = state.tender?.submission_deadline || '';
 
   return (
     <div className="min-h-screen bg-page text-primary flex flex-col font-sans transition-colors duration-150">
@@ -338,119 +276,66 @@ export default function App() {
         tenderId={state.tender?.tender_id || null}
         lang={state.lang}
         theme={state.theme}
-        onLanguageChange={handleLanguageChange}
-        onThemeToggle={handleThemeToggle}
-        onAssistantToggle={handleAssistantToggle}
+        onLanguageChange={setLanguage}
+        onThemeToggle={() => setTheme(state.theme === 'dark' ? 'light' : 'dark')}
+        onAssistantToggle={() => setIsAssistantOpen((prev) => !prev)}
         isAssistantOpen={isAssistantOpen}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onExportCsv={handleExportCsv}
+        onExportProject={handleExportProjectJson}
+        onImportProject={() => projectImportInputRef.current?.click()}
+      />
+
+      <input
+        ref={projectImportInputRef}
+        type="file"
+        accept=".json"
+        onChange={handleImportProjectJson}
+        className="hidden"
       />
 
       <main className="flex-1 max-w-[1280px] w-full mx-auto p-4 sm:p-6 md:p-8 flex flex-col gap-6 pb-28">
+        {/* Re-link Pending Matches Banner */}
+        {pendingCount > 0 && (
+          <div className="p-4 rounded-xl border border-accent-steel/30 bg-accent-steel/5 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <AlertIcon size={18} className="text-accent-steel shrink-0" />
+              <div>
+                <h4 className="text-xs font-semibold text-primary">
+                  {t('relink_banner_title', undefined, state.lang)}
+                </h4>
+                <p className="text-[11px] text-muted mt-0.5">
+                  {t('relink_banner_desc', { count: formatNumber(pendingCount, state.lang) }, state.lang)}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => dispatch({ type: 'CLEAR_PENDING' })}
+              className="text-xs text-muted hover:text-primary transition-colors cursor-pointer px-2.5 py-1 rounded border border-border bg-surface shrink-0"
+            >
+              {t('relink_dismiss', undefined, state.lang)}
+            </button>
+          </div>
+        )}
+
         {/* Tender Header Card */}
         <TenderHeader
           tender={state.tender}
           onTenderLoaded={handleTenderLoaded}
           lang={state.lang}
+          summary={summary}
           totalFiles={state.files.length}
-          matchedCount={matchedCount}
-          totalRequirements={state.requirements.length}
+          matchedCount={Object.keys(state.matches).length}
+          onToast={notify}
         />
 
-        {/* Action Toolbar (Auto-match, CSV export, Index page toggle, Seal stamp, Backup) */}
-        <div className="flex items-center justify-between gap-3 flex-wrap bg-surface border border-border rounded px-4 py-2.5 text-xs">
-          <div className="flex items-center gap-2 flex-wrap">
-            {/* Auto-Match Button */}
-            <button
-              type="button"
-              id="automatch-btn"
-              onClick={handleAutoMatch}
-              disabled={state.requirements.length === 0 || state.files.length === 0}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-border bg-subtle text-primary hover:border-black/30 dark:hover:border-white/30 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed font-medium"
-            >
-              <span>{t('btn_automatch', undefined, state.lang)}</span>
-            </button>
-
-            {/* CSV Export Button */}
-            <button
-              type="button"
-              id="export-csv-btn"
-              onClick={handleExportCsv}
-              disabled={state.requirements.length === 0}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded border border-border bg-subtle text-primary hover:border-black/30 dark:hover:border-white/30 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed font-medium"
-            >
-              <DownloadIcon size={14} />
-              <span>{t('btn_export_csv', undefined, state.lang)}</span>
-            </button>
-
-            {/* Digital Seal / Signature Modal Button */}
-            <button
-              type="button"
-              id="seal-stamp-btn"
-              onClick={() => setIsSealModalOpen(true)}
-              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded border text-xs font-medium transition-colors cursor-pointer ${
-                sealSettings.imageBytes
-                  ? 'border-accent-steel bg-accent-steel text-white'
-                  : 'border-border bg-subtle text-primary hover:border-black/30 dark:hover:border-white/30'
-              }`}
-            >
-              <span>
-                {sealSettings.imageBytes
-                  ? `${t('seal_heading', undefined, state.lang)} (Active)`
-                  : t('seal_heading', undefined, state.lang)}
-              </span>
-            </button>
-          </div>
-
-          <div className="flex items-center gap-3">
-            {/* Index Page Toggle */}
-            <label className="flex items-center gap-2 text-xs text-muted cursor-pointer select-none">
-              <input
-                type="checkbox"
-                id="toggle-index-page"
-                checked={includeIndexPage}
-                onChange={(e) => setIncludeIndexPage(e.target.checked)}
-                className="rounded border-border accent-accent-steel cursor-pointer"
-              />
-              <span className="font-medium text-primary">
-                {t('btn_include_index', undefined, state.lang)}
-              </span>
-            </label>
-
-            {/* Backup Project */}
-            <button
-              type="button"
-              onClick={handleExportProjectJson}
-              disabled={!state.tender}
-              className="text-muted hover:text-primary transition-colors cursor-pointer text-[11px] disabled:opacity-40"
-              title="Backup project to JSON"
-            >
-              {t('btn_project_export', undefined, state.lang)}
-            </button>
-
-            {/* Restore Project */}
-            <input
-              ref={projectImportInputRef}
-              type="file"
-              accept=".json"
-              onChange={handleImportProjectJson}
-              className="hidden"
-            />
-            <button
-              type="button"
-              onClick={() => projectImportInputRef.current?.click()}
-              className="text-muted hover:text-primary transition-colors cursor-pointer text-[11px]"
-              title="Restore project from JSON"
-            >
-              {t('btn_project_import', undefined, state.lang)}
-            </button>
-          </div>
-        </div>
-
-        {/* Workspace: Requirements (2fr) + Files panel (1fr) */}
+        {/* Workspace: Requirements Checklist (2fr) + Files panel (1fr) */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
           {/* Left: Requirements List Checklist (2fr) */}
           <section
             id="requirements-checklist-panel"
-            className="lg:col-span-2 flex flex-col gap-4 bg-surface border border-border rounded p-5 shadow-xs"
+            className="lg:col-span-2 flex flex-col gap-4 bg-surface border border-border rounded-xl p-5 shadow-xs"
           >
             <div className="flex items-center justify-between pb-3 border-b border-border">
               <div>
@@ -465,7 +350,7 @@ export default function App() {
               {state.requirements.length > 0 && (
                 <div className="flex items-center gap-2">
                   <span className="text-xs font-mono px-2 py-0.5 rounded bg-subtle text-muted border border-border">
-                    {formatNumber(matchedCount, state.lang)}/{formatNumber(state.requirements.length, state.lang)}{' '}
+                    {formatNumber(Object.keys(state.matches).length, state.lang)}/{formatNumber(state.requirements.length, state.lang)}{' '}
                     {state.lang === 'bn' ? 'ম্যাচড' : 'matched'}
                   </span>
                 </div>
@@ -501,6 +386,8 @@ export default function App() {
                       requirement={req}
                       matchedFile={matchedFile}
                       availableFiles={availableFiles}
+                      currentMatches={state.matches}
+                      allFiles={state.files}
                       computedStatus={rowStatus}
                       expiryDate={expiry}
                       onMatchChange={handleMatchChange}
@@ -517,7 +404,7 @@ export default function App() {
           {/* Right: Files Panel (1fr) */}
           <section
             id="uploaded-files-panel"
-            className="flex flex-col gap-4 bg-surface border border-border rounded p-5 shadow-xs"
+            className="flex flex-col gap-4 bg-surface border border-border rounded-xl p-5 shadow-xs"
           >
             <div className="flex items-center justify-between pb-3 border-b border-border">
               <div>
@@ -539,7 +426,11 @@ export default function App() {
             {/* Upload Zone */}
             <UploadZone
               currentFiles={state.files}
+              requirements={state.requirements}
+              matches={state.matches}
               onFilesAdded={handleFilesAdded}
+              onApplyMatches={handleApplyMatches}
+              onToast={notify}
               lang={state.lang}
             />
 
@@ -553,8 +444,10 @@ export default function App() {
             ) : (
               <div className="flex flex-col gap-2 max-h-[460px] overflow-y-auto pr-1">
                 {state.files.map((file) => {
-                  const isDup = isFileDuplicate(file, state.files);
-                  const duplicateSiblings = getSiblingDuplicateNames(file, state.files);
+                  const isDup = (hashCounts.get(file.hash) || 0) > 1;
+                  const duplicateSiblings = state.files
+                    .filter((f) => f.hash === file.hash && f.id !== file.id)
+                    .map((f) => f.name);
                   const matchedReqId = fileToRequirementMap.get(file.id);
                   const matchedReq = matchedReqId
                     ? state.requirements.find((r) => r.id === matchedReqId)
@@ -580,12 +473,16 @@ export default function App() {
 
       {/* Sticky Bottom Generate Bar */}
       <GenerateBar
-        summary={statusSummary}
+        summary={summary}
         onGenerate={handleGenerateClick}
         onDownloadLastGenerated={handleDownloadLastGenerated}
         hasGeneratedPackage={hasGeneratedPackage}
         isGenerating={isGenerating}
         progress={generateProgress}
+        includeIndexPage={includeIndexPage}
+        onToggleIndexPage={setIncludeIndexPage}
+        onOpenSealModal={() => setIsSealModalOpen(true)}
+        hasSealConfigured={Boolean(sealSettings.imageBytes)}
         lang={state.lang}
       />
 
@@ -594,7 +491,9 @@ export default function App() {
         isOpen={isAssistantOpen}
         onClose={() => setIsAssistantOpen(false)}
         tender={state.tender}
-        statusSummary={statusSummary}
+        requirements={state.requirements}
+        files={state.files}
+        blockers={summary.blockers}
         lang={state.lang}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />

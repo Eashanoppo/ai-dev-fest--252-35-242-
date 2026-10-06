@@ -1,177 +1,190 @@
-import { UploadedFile, Requirement } from '../types';
+import { Requirement, UploadedFile } from '../types';
+
+const STOPWORDS = new Set([
+  'pdf',
+  'doc',
+  'document',
+  'file',
+  'copy',
+  'certificate',
+  'cert',
+  'of',
+  'the',
+  'and',
+  'in',
+  'for',
+  'to',
+  'a',
+  'an',
+  'scan',
+  'final',
+  'new',
+  'ltd',
+  'limited',
+]);
 
 /**
- * Returns a map of hash -> files where multiple files share the exact same hash
+ * Tokenize string into lowercase alphanumeric and Unicode (Bangla) tokens.
  */
-export function getDuplicateGroups(files: UploadedFile[]): Map<string, UploadedFile[]> {
-  const hashMap = new Map<string, UploadedFile[]>();
+function tokenize(str: string): string[] {
+  // Split on camelCase boundaries first
+  const unCamel = str.replace(/([a-z])([A-Z])/g, '$1 $2');
+  // Match letters, marks (accents/Bangla vowel signs), and numbers
+  const tokens = unCamel
+    .toLowerCase()
+    .replace(/[._\-–—()[\]{}+/\\@#%&*]/g, ' ')
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2 && !STOPWORDS.has(s));
 
-  files.forEach((file) => {
-    if (!file.valid || !file.hash) return;
-    const existing = hashMap.get(file.hash) || [];
-    existing.push(file);
-    hashMap.set(file.hash, existing);
-  });
-
-  const duplicatesOnly = new Map<string, UploadedFile[]>();
-  hashMap.forEach((group, hash) => {
-    if (group.length > 1) {
-      duplicatesOnly.set(hash, group);
-    }
-  });
-
-  return duplicatesOnly;
+  return tokens;
 }
 
 /**
- * Check if a file belongs to a duplicate group
+ * Computes Dice similarity coefficient between two token sets: (2 * |A ∩ B|) / (|A| + |B|)
  */
-export function isFileDuplicate(file: UploadedFile, files: UploadedFile[]): boolean {
-  if (!file.valid || !file.hash) return false;
-  return files.filter((f) => f.valid && f.hash === file.hash).length > 1;
-}
+function diceSimilarity(tokensA: string[], tokensB: string[]): number {
+  if (tokensA.length === 0 || tokensB.length === 0) return 0;
+  const setB = new Set(tokensB);
+  let intersection = 0;
 
-/**
- * Get other file names that share the same hash
- */
-export function getSiblingDuplicateNames(file: UploadedFile, files: UploadedFile[]): string[] {
-  if (!file.valid || !file.hash) return [];
-  return files
-    .filter((f) => f.id !== file.id && f.valid && f.hash === file.hash)
-    .map((f) => f.name);
-}
-
-/**
- * Check if matching this file to target requirement violates duplicate constraints:
- * If another file in the same duplicate group is already matched to a DIFFERENT requirement,
- * this match attempt is blocked.
- */
-export function checkDuplicateMatchConflict(
-  fileId: string,
-  targetRequirementId: string,
-  files: UploadedFile[],
-  matches: Record<string, string>
-): { allowed: boolean; conflictingReqId?: string; conflictingFileName?: string } {
-  const currentFile = files.find((f) => f.id === fileId);
-  if (!currentFile || !currentFile.hash) {
-    return { allowed: true };
-  }
-
-  // Find other files in the same duplicate group
-  const duplicateSiblings = files.filter(
-    (f) => f.id !== fileId && f.valid && f.hash === currentFile.hash
-  );
-
-  if (duplicateSiblings.length === 0) {
-    return { allowed: true };
-  }
-
-  // Check if any duplicate sibling is matched to any requirement
-  for (const sibling of duplicateSiblings) {
-    for (const [reqId, matchedFileId] of Object.entries(matches)) {
-      if (matchedFileId === sibling.id && reqId !== targetRequirementId) {
-        return {
-          allowed: false,
-          conflictingReqId: reqId,
-          conflictingFileName: sibling.name,
-        };
+  for (const token of tokensA) {
+    if (setB.has(token)) {
+      intersection++;
+    } else {
+      // Partial prefix/substring match for words of length >= 4
+      for (const b of setB) {
+        if (
+          (token.length >= 4 && b.includes(token)) ||
+          (b.length >= 4 && token.includes(b))
+        ) {
+          intersection += 0.8;
+          break;
+        }
       }
     }
   }
 
-  return { allowed: true };
+  return (2 * intersection) / (tokensA.length + tokensB.length);
+}
+
+export interface MatchSuggestion {
+  requirementId: string;
+  fileId: string;
+  confidence: number;
 }
 
 /**
- * Tokenize and normalize string for auto-matching
+ * Finds best 1:1 auto-matches without overwriting existing matches
+ * and without matching duplicate files to different requirements.
  */
-export function tokenizeText(text: string): Set<string> {
-  const cleaned = text
-    .toLowerCase()
-    .replace(/[._\-–—()[\]/\\,]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const tokens = cleaned
-    .split(' ')
-    .map((t) => t.trim())
-    .filter((t) => t.length > 1 && !/^\d+$/.test(t));
-
-  return new Set(tokens);
-}
-
-/**
- * Auto-match engine: greedy token overlap between normalized filename and requirement titles.
- * Strictly respects 1:1 matching, duplicate constraints, and never overwrites manual matches.
- */
-export function computeAutoMatches(
+export function autoMatchFiles(
   requirements: Requirement[],
   files: UploadedFile[],
   existingMatches: Record<string, string>
-): Record<string, string> {
-  const newMatches: Record<string, string> = {};
-  const matchedFileIds = new Set(Object.values(existingMatches));
+): MatchSuggestion[] {
+  const validFiles = files.filter((f) => f.valid);
+  if (validFiles.length === 0 || requirements.length === 0) {
+    return [];
+  }
 
-  // Filter requirements that do not have a match yet
-  const availableRequirements = requirements.filter((r) => !existingMatches[r.id]);
-  const availableFiles = files.filter((f) => f.valid && !matchedFileIds.has(f.id));
+  // Already assigned file IDs
+  const assignedFileIds = new Set(Object.values(existingMatches));
 
-  // Compute match candidates with overlap score
-  const candidates: Array<{
+  // Determine hash set of already matched files to avoid matching a duplicate to another requirement
+  const matchedHashes = new Map<string, string>(); // hash -> reqId
+  for (const [reqId, fileId] of Object.entries(existingMatches)) {
+    const matchedFile = files.find((f) => f.id === fileId);
+    if (matchedFile) {
+      matchedHashes.set(matchedFile.hash, reqId);
+    }
+  }
+
+  // Filter requirements that do not yet have a match
+  const unassignedReqs = requirements.filter((r) => !existingMatches[r.id]);
+
+  // Available files that are not yet assigned
+  const availableFiles = validFiles.filter((f) => !assignedFileIds.has(f.id));
+
+  const candidates: {
     reqId: string;
     fileId: string;
     score: number;
-  }> = [];
+  }[] = [];
 
-  for (const req of availableRequirements) {
-    const reqEnTokens = tokenizeText(req.title_en);
-    const reqBnTokens = req.title_bn ? tokenizeText(req.title_bn) : new Set<string>();
+  for (const req of unassignedReqs) {
+    const titleTokens = [
+      ...tokenize(req.title_en),
+      ...(req.title_bn ? tokenize(req.title_bn) : []),
+    ];
 
     for (const file of availableFiles) {
-      const fileTokens = tokenizeText(file.name.replace(/\.pdf$/i, ''));
-      if (fileTokens.size === 0) continue;
+      // If this file's hash is already matched to a DIFFERENT requirement, skip it!
+      const existingReqForHash = matchedHashes.get(file.hash);
+      if (existingReqForHash && existingReqForHash !== req.id) {
+        continue;
+      }
 
-      let matchCount = 0;
-      fileTokens.forEach((token) => {
-        if (reqEnTokens.has(token) || reqBnTokens.has(token)) {
-          matchCount++;
-        }
-      });
+      // Tokenize filename (without extension)
+      const baseName = file.name.replace(/\.[^/.]+$/, '');
+      const fileTokens = tokenize(baseName);
 
-      if (matchCount > 0) {
-        // Score = matched tokens / total requirement tokens
-        const totalReqTokens = Math.max(reqEnTokens.size, 1);
-        const score = matchCount / totalReqTokens;
-        candidates.push({ reqId: req.id, fileId: file.id, score });
+      // Also check requirement ID match (e.g., "R01" or "01")
+      const reqIdNormalized = req.id.toLowerCase().replace(/^r0*/, '');
+      const hasIdMatch =
+        fileTokens.some((t) => t.toLowerCase() === req.id.toLowerCase()) ||
+        baseName.toLowerCase().startsWith(req.id.toLowerCase()) ||
+        (reqIdNormalized.length > 0 &&
+          fileTokens.some((t) => t === reqIdNormalized || t === `0${reqIdNormalized}`));
+
+      let score = diceSimilarity(titleTokens, fileTokens);
+      if (hasIdMatch) {
+        score = Math.max(score, 0.75) + 0.25;
+      }
+
+      // Threshold: minimum 0.35 similarity or strong ID match
+      if (score >= 0.35) {
+        candidates.push({
+          reqId: req.id,
+          fileId: file.id,
+          score,
+        });
       }
     }
   }
 
-  // Sort greedy by score descending
+  // Sort candidates by score descending
   candidates.sort((a, b) => b.score - a.score);
 
-  const assignedReqs = new Set<string>();
-  const assignedFiles = new Set<string>();
+  const finalMatches: MatchSuggestion[] = [];
+  const chosenReqs = new Set<string>();
+  const chosenFiles = new Set<string>();
+  const chosenHashes = new Map<string, string>(matchedHashes);
 
   for (const candidate of candidates) {
-    if (assignedReqs.has(candidate.reqId) || assignedFiles.has(candidate.fileId)) {
+    if (chosenReqs.has(candidate.reqId) || chosenFiles.has(candidate.fileId)) {
       continue;
     }
 
-    // Check duplicate group constraint
-    const conflict = checkDuplicateMatchConflict(
-      candidate.fileId,
-      candidate.reqId,
-      files,
-      { ...existingMatches, ...newMatches }
-    );
+    const file = files.find((f) => f.id === candidate.fileId);
+    if (!file) continue;
 
-    if (conflict.allowed) {
-      newMatches[candidate.reqId] = candidate.fileId;
-      assignedReqs.add(candidate.reqId);
-      assignedFiles.add(candidate.fileId);
+    // Check duplicate hash conflict
+    const existingReq = chosenHashes.get(file.hash);
+    if (existingReq && existingReq !== candidate.reqId) {
+      continue;
     }
+
+    chosenReqs.add(candidate.reqId);
+    chosenFiles.add(candidate.fileId);
+    chosenHashes.set(file.hash, candidate.reqId);
+
+    finalMatches.push({
+      requirementId: candidate.reqId,
+      fileId: candidate.fileId,
+      confidence: Math.min(candidate.score, 1),
+    });
   }
 
-  return newMatches;
+  return finalMatches;
 }

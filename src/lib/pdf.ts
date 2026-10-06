@@ -1,591 +1,713 @@
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
-import { Tender, Requirement, UploadedFile, GenerateProgress } from '../types';
-
-/**
- * In-memory storage for raw ArrayBuffers of uploaded PDFs.
- * Keeps React state lightweight and avoids localStorage quotas.
- */
-const bufferStore = new Map<string, ArrayBuffer>();
-
-export function storeFileBuffer(fileId: string, buffer: ArrayBuffer): void {
-  bufferStore.set(fileId, buffer);
-}
-
-export function getFileBuffer(fileId: string): ArrayBuffer | undefined {
-  return bufferStore.get(fileId);
-}
-
-export function removeFileBuffer(fileId: string): void {
-  bufferStore.delete(fileId);
-}
-
-export function clearAllFileBuffers(): void {
-  bufferStore.clear();
-}
-
-/**
- * Validate PDF Magic Bytes (%PDF) within the first 1024 bytes.
- */
-export function isValidPdfMagic(buffer: ArrayBuffer): boolean {
-  if (buffer.byteLength < 4) return false;
-
-  const headerLimit = Math.min(buffer.byteLength - 4, 1024);
-  const bytes = new Uint8Array(buffer, 0, headerLimit + 4);
-
-  // Search for '%PDF' -> ASCII: 0x25, 0x50, 0x44, 0x46
-  for (let i = 0; i <= headerLimit; i++) {
-    if (
-      bytes[i] === 0x25 &&
-      bytes[i + 1] === 0x50 &&
-      bytes[i + 2] === 0x44 &&
-      bytes[i + 3] === 0x46
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-export interface PdfInspectResult {
-  pageCount: number;
-  valid: boolean;
-  error?: string;
-}
-
-/**
- * Fast binary regex fallback to count /Type /Page objects in raw PDF
- */
-export function countPagesFromRawPdf(buffer: ArrayBuffer): number {
-  try {
-    const bytes = new Uint8Array(buffer);
-    let binaryStr = '';
-    // Read up to 2MB or entire file if smaller
-    const len = Math.min(bytes.length, 2 * 1024 * 1024);
-    for (let i = 0; i < len; i++) {
-      binaryStr += String.fromCharCode(bytes[i] || 0);
-    }
-    const matches = binaryStr.match(/\/Type\s*\/Page(?![s\w])/g);
-    return matches ? matches.length : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/**
- * Inspect PDF: load document and retrieve exact page count.
- * Uses a multi-stage approach with pdf-lib, encryption fallback, and regex verification.
- * Guarantees correct page counts even on scanned, linearized, or permissions-encrypted PDFs.
- */
-export async function inspectPdf(buffer: ArrayBuffer): Promise<PdfInspectResult> {
-  if (!isValidPdfMagic(buffer)) {
-    return {
-      pageCount: 0,
-      valid: false,
-      error: 'Not a valid PDF file (missing %PDF signature)',
-    };
-  }
-
-  // Clone buffer slice to ensure it is not mutated or detached
-  const cloned = buffer.slice(0);
-
-  // Attempt 1: Standard load with pdf-lib
-  try {
-    const doc = await PDFDocument.load(cloned, { ignoreEncryption: true });
-    let pageCount = doc.getPageCount();
-
-    // Verify against actual page array length
-    const resolvedPages = doc.getPages();
-    if (resolvedPages.length > 0 && resolvedPages.length !== pageCount) {
-      pageCount = resolvedPages.length;
-    }
-
-    if (pageCount > 0) {
-      return {
-        pageCount,
-        valid: true,
-      };
-    }
-  } catch (err) {
-    // If standard load fails, try regex fallback before reporting unreadable
-    const regexCount = countPagesFromRawPdf(buffer);
-    if (regexCount > 0) {
-      return {
-        pageCount: regexCount,
-        valid: true,
-      };
-    }
-
-    const errorMsg = err instanceof Error ? err.message : 'Unknown PDF parse error';
-    return {
-      pageCount: 0,
-      valid: false,
-      error: `Unreadable or protected: ${errorMsg}`,
-    };
-  }
-
-  // Attempt 2: Fallback to regex scan if pdf-lib reported 0 pages
-  const fallbackCount = countPagesFromRawPdf(buffer);
-  return {
-    pageCount: Math.max(fallbackCount, 1),
-    valid: true,
-  };
-}
-
-/**
- * Sanitize tender ID for safe filename output
- */
-export function sanitizeFilename(tenderId: string): string {
-  const sanitized = tenderId.replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_').trim();
-  return sanitized.length > 0 ? sanitized : 'Tender';
-}
-
-/**
- * Sanitize ASCII text for StandardFonts (Helvetica) to prevent WinAnsi encoding crashes
- */
-function sanitizeAscii(str: string): string {
-  // Replace characters not in standard Latin/WinAnsi range with close equivalents or '?'
-  return str.replace(/[^\x20-\x7E\xA0-\xFF]/g, '?');
-}
+import {
+  PDFDocument,
+  StandardFonts,
+  rgb,
+  degrees,
+  PDFPage,
+  PDFFont,
+} from 'pdf-lib';
+import {
+  Tender,
+  Requirement,
+  UploadedFile,
+  GenerateProgress,
+  SealSettings,
+} from '../types';
+import { getFileBuffer } from './fileStore';
+import { resolveMatchedFile } from './status';
+import { parsePageRanges } from './ranges';
 
 export interface BuildPackageOptions {
+  tender: Tender;
+  requirements: Requirement[];
+  files: UploadedFile[];
+  matches: Record<string, string>;
   includeIndexPage?: boolean;
-  sealImageBytes?: Uint8Array;
-  sealPlacement?: {
-    scope: 'all' | 'first' | 'last';
-    corner: 'bottom-right' | 'bottom-left' | 'top-right' | 'top-left';
-    sizePercent: number;
-  };
+  seal?: SealSettings | null;
   onProgress?: (progress: GenerateProgress) => void;
+  getBuffer?: (fileId: string) => ArrayBuffer | undefined;
+  generationDate?: Date;
 }
 
-export interface PackageBuildResult {
+export interface BuildPackageResult {
   pdfBytes: Uint8Array;
   filename: string;
   totalPages: number;
+  docStartPages: Record<string, number>;
+}
+
+// A4 Dimensions in points: 210mm x 297mm (72 dpi)
+const A4_WIDTH = 595.28;
+const A4_HEIGHT = 841.89;
+const FOOTER_STRIP_HEIGHT = 20;
+
+export function sanitizeFilename(tenderId: string): string {
+  const clean = tenderId.replace(/[^A-Za-z0-9._-]/g, '_').replace(/_+/g, '_').trim();
+  return `${clean || 'Tender'}_Package.pdf`;
+}
+
+function formatDateString(isoString: string | undefined): string {
+  if (!isoString) return '';
+  try {
+    const parts = isoString.split('-');
+    if (parts.length === 3 && parts[0] && parts[1] && parts[2]) {
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10) - 1;
+      const day = parseInt(parts[2], 10);
+      const d = new Date(Date.UTC(year, month, day));
+      return d.toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        timeZone: 'UTC',
+      });
+    }
+  } catch {
+    // fallback
+  }
+  return isoString;
 }
 
 /**
- * Build the final combined compliant Tender Package PDF according to Section 6:
- * Page 1 = Cover (English, A4: tender ID, title, procuring entity, bidder, deadline, date, numbered doc list)
- * [Optional Page 2 = Index page with starting page numbers]
- * Then included docs sorted by order (all pages, original order, skip optional with no file).
- * Precompute Y = 1 + [1] + sum of pages of included docs.
- * Draw on EVERY page (including cover): white rect (height 20pt at bottom), centered 8pt Helvetica #333: "${tenderId} | Page ${i} of ${Y}".
+ * Wraps text into lines that do not exceed maxWidth.
  */
-export async function buildPackage(
-  tender: Tender,
-  requirements: Requirement[],
-  files: UploadedFile[],
-  matches: Record<string, string>,
-  options: BuildPackageOptions = {}
-): Promise<PackageBuildResult> {
-  const { includeIndexPage = false, sealImageBytes, sealPlacement, onProgress } = options;
+function wrapText(text: string, font: PDFFont, fontSize: number, maxWidth: number): string[] {
+  const words = text.split(/\s+/);
+  const lines: string[] = [];
+  let currentLine = '';
+
+  for (const word of words) {
+    const candidate = currentLine ? `${currentLine} ${word}` : word;
+    const width = font.widthOfTextAtSize(candidate, fontSize);
+    if (width <= maxWidth) {
+      currentLine = candidate;
+    } else {
+      if (currentLine) {
+        lines.push(currentLine);
+      }
+      currentLine = word;
+    }
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.length > 0 ? lines : [text];
+}
+
+interface IncludedDoc {
+  req: Requirement;
+  file: UploadedFile;
+  pageCount: number;
+}
+
+/**
+ * Main PDF Package Builder
+ */
+export async function buildPackage(options: BuildPackageOptions): Promise<BuildPackageResult> {
+  const {
+    tender,
+    requirements,
+    files,
+    matches,
+    includeIndexPage = false,
+    seal = null,
+    onProgress,
+    getBuffer = getFileBuffer,
+    generationDate = new Date(),
+  } = options;
 
   onProgress?.({
     phase: 'validating',
-    currentDocIndex: 0,
-    totalDocs: requirements.length,
-    messageEn: 'Validating and arranging documents in order...',
-    messageBn: 'ডকুমেন্টসমূহ ক্রম অনুযায়ী বিন্যাস করা হচ্ছে...',
+    current: 0,
+    total: 100,
+    title: 'Validating documents',
+    pages: 0,
   });
 
-  const fileMap = new Map<string, UploadedFile>();
-  files.forEach((f) => fileMap.set(f.id, f));
+  // Sort requirements by order ascending
+  const sortedReqs = [...requirements].sort((a, b) => a.order - b.order);
 
-  // 1. Identify included documents: sorted by requirement.order, MUST have matched valid file
-  // Optional documents without a matched file are skipped
-  const sortedRequirements = [...requirements].sort((a, b) => a.order - b.order);
-  const includedItems: Array<{
-    req: Requirement;
-    file: UploadedFile;
-    buffer: ArrayBuffer;
-  }> = [];
+  const includedDocs: IncludedDoc[] = [];
 
-  for (const req of sortedRequirements) {
-    const fileId = matches[req.id];
-    if (fileId) {
-      const file = fileMap.get(fileId);
-      if (file && file.valid) {
-        const buffer = getFileBuffer(file.id);
-        if (buffer) {
-          includedItems.push({ req, file, buffer });
-        }
-      }
+  for (const req of sortedReqs) {
+    const file = resolveMatchedFile(req.id, files, matches);
+    if (!file) {
+      continue; // Skip unmatched optional documents
     }
+
+    const buf = getBuffer(file.id);
+    if (!buf) {
+      throw new Error(`Buffer missing for matched file "${file.name}" (ID: ${file.id})`);
+    }
+
+    includedDocs.push({
+      req,
+      file,
+      pageCount: file.pageCount,
+    });
   }
 
-  // Precompute body page counts
-  let bodyPagesCount = 0;
-  for (const item of includedItems) {
-    bodyPagesCount += item.file.pageCount;
+  if (includedDocs.length === 0) {
+    throw new Error('No valid documents matched to include in the package.');
   }
 
-  const coverPagesCount = 1;
-  const indexPagesCount = includeIndexPage ? 1 : 0;
-  const totalPagesY = coverPagesCount + indexPagesCount + bodyPagesCount;
+  // Precompute Cover & Index layout to know total pages Y accurately
+  // Standard cover page capacity: header takes ~340pt, doc list item takes ~28pt.
+  // First cover page can fit up to 14 items; continuation cover pages fit up to 24 items.
+  const docsPerFirstCover = 14;
+  const docsPerContCover = 24;
+  let coverPageCount = 1;
+  if (includedDocs.length > docsPerFirstCover) {
+    coverPageCount += Math.ceil((includedDocs.length - docsPerFirstCover) / docsPerContCover);
+  }
 
-  // Create merged PDF Document
-  const mergedPdf = await PDFDocument.create();
-  const helveticaFont = await mergedPdf.embedFont(StandardFonts.Helvetica);
-  const helveticaBoldFont = await mergedPdf.embedFont(StandardFonts.HelveticaBold);
+  let indexPageCount = 0;
+  if (includeIndexPage) {
+    indexPageCount = Math.max(1, Math.ceil(includedDocs.length / 22));
+  }
 
-  // A4 dimensions: 595.28 x 841.89 points
-  const A4_WIDTH = 595.28;
-  const A4_HEIGHT = 841.89;
+  const totalBodyPages = includedDocs.reduce((acc, doc) => acc + doc.pageCount, 0);
+  const totalPackagePages = coverPageCount + indexPageCount + totalBodyPages;
 
-  // -----------------------------------------------------------------
-  // PAGE 1: COVER PAGE (English, A4)
-  // -----------------------------------------------------------------
   onProgress?.({
     phase: 'cover',
-    currentDocIndex: 0,
-    totalDocs: includedItems.length,
-    messageEn: 'Generating formal cover page...',
-    messageBn: 'কভার পৃষ্ঠা তৈরি করা হচ্ছে...',
+    current: 10,
+    total: 100,
+    title: 'Generating cover page',
+    pages: coverPageCount,
   });
 
-  const coverPage = mergedPdf.addPage([A4_WIDTH, A4_HEIGHT]);
-  const marginX = 48;
-  let cursorY = A4_HEIGHT - 60;
+  const mergedDoc = await PDFDocument.create();
+  const helvetica = await mergedDoc.embedFont(StandardFonts.Helvetica);
+  const helveticaBold = await mergedDoc.embedFont(StandardFonts.HelveticaBold);
 
-  // Kicker
-  coverPage.drawText('TENDER DOCUMENT SUBMISSION PACKAGE', {
-    x: marginX,
-    y: cursorY,
-    size: 10,
-    font: helveticaBoldFont,
-    color: rgb(0.36, 0.42, 0.48), // Steel accent
-  });
-  cursorY -= 28;
+  const madeDateIso = generationDate.toISOString().slice(0, 10);
+  const madeDateLong = formatDateString(madeDateIso);
+  const deadlineLong = formatDateString(tender.submission_deadline);
 
-  // Large Tender ID
-  coverPage.drawText(sanitizeAscii(tender.tender_id), {
-    x: marginX,
-    y: cursorY,
-    size: 26,
-    font: helveticaBoldFont,
-    color: rgb(0.06, 0.06, 0.06),
-  });
-  cursorY -= 24;
+  // 1. Draw Cover Pages
+  let docIndex = 0;
+  for (let c = 0; c < coverPageCount; c++) {
+    const page = mergedDoc.addPage([A4_WIDTH, A4_HEIGHT]);
+    const isFirstCover = c === 0;
 
-  // Tender Title
-  const cleanTitle = sanitizeAscii(tender.title);
-  coverPage.drawText(cleanTitle, {
-    x: marginX,
-    y: cursorY,
-    size: 16,
-    font: helveticaFont,
-    color: rgb(0.2, 0.2, 0.2),
-  });
-  cursorY -= 24;
+    let cursorY = A4_HEIGHT - 54;
 
-  // Horizontal Rule
-  coverPage.drawLine({
-    start: { x: marginX, y: cursorY },
-    end: { x: A4_WIDTH - marginX, y: cursorY },
-    thickness: 0.75,
-    color: rgb(0.8, 0.8, 0.8),
-  });
-  cursorY -= 20;
+    if (isFirstCover) {
+      // Top Kicker
+      page.drawText('TENDER SUBMISSION PACKAGE', {
+        x: 54,
+        y: cursorY,
+        size: 9,
+        font: helveticaBold,
+        color: rgb(0.3, 0.35, 0.4),
+      });
+      cursorY -= 26;
 
-  // Metadata Grid
-  const metaRows: Array<[string, string]> = [
-    ['Procuring Entity:', sanitizeAscii(tender.procuring_entity)],
-    ['Bidder Organization:', sanitizeAscii(tender.bidder)],
-    ['Submission Deadline:', sanitizeAscii(tender.submission_deadline)],
-    ['Package Compiled Date:', new Date().toISOString().slice(0, 10)],
-    ['Included Documents:', `${includedItems.length} documents (${bodyPagesCount} pages)`],
-  ];
+      // Tender ID
+      page.drawText(tender.tender_id, {
+        x: 54,
+        y: cursorY,
+        size: 24,
+        font: helveticaBold,
+        color: rgb(0.08, 0.1, 0.14),
+      });
+      cursorY -= 32;
 
-  for (const [label, val] of metaRows) {
-    coverPage.drawText(label, {
-      x: marginX,
-      y: cursorY,
-      size: 9.5,
-      font: helveticaBoldFont,
-      color: rgb(0.4, 0.4, 0.4),
-    });
-    coverPage.drawText(val, {
-      x: marginX + 160,
-      y: cursorY,
-      size: 9.5,
-      font: helveticaFont,
-      color: rgb(0.1, 0.1, 0.1),
-    });
-    cursorY -= 17;
+      // Tender Title (wrapped)
+      const titleLines = wrapText(tender.title, helveticaBold, 15, A4_WIDTH - 108);
+      for (const line of titleLines) {
+        page.drawText(line, {
+          x: 54,
+          y: cursorY,
+          size: 15,
+          font: helveticaBold,
+          color: rgb(0.12, 0.15, 0.2),
+        });
+        cursorY -= 20;
+      }
+      cursorY -= 12;
+
+      // Metadata Divider Line
+      page.drawLine({
+        start: { x: 54, y: cursorY },
+        end: { x: A4_WIDTH - 54, y: cursorY },
+        thickness: 1,
+        color: rgb(0.85, 0.87, 0.9),
+      });
+      cursorY -= 20;
+
+      // Metadata Key-Value Grid
+      const metaRows: [string, string][] = [
+        ['Procuring Entity:', tender.procuring_entity || 'N/A'],
+        ['Bidder Name:', tender.bidder || 'N/A'],
+        ['Submission Deadline:', `${tender.submission_deadline} (${deadlineLong})`],
+        ['Package Generated On:', `${madeDateIso} (${madeDateLong})`],
+      ];
+
+      for (const [key, val] of metaRows) {
+        page.drawText(key, {
+          x: 54,
+          y: cursorY,
+          size: 9.5,
+          font: helveticaBold,
+          color: rgb(0.35, 0.4, 0.45),
+        });
+        page.drawText(val, {
+          x: 200,
+          y: cursorY,
+          size: 9.5,
+          font: helvetica,
+          color: rgb(0.12, 0.15, 0.2),
+        });
+        cursorY -= 17;
+      }
+
+      cursorY -= 12;
+
+      // Document list header
+      page.drawText('Included Documents', {
+        x: 54,
+        y: cursorY,
+        size: 11,
+        font: helveticaBold,
+        color: rgb(0.1, 0.12, 0.16),
+      });
+      cursorY -= 10;
+
+      page.drawLine({
+        start: { x: 54, y: cursorY },
+        end: { x: A4_WIDTH - 54, y: cursorY },
+        thickness: 0.75,
+        color: rgb(0.85, 0.87, 0.9),
+      });
+      cursorY -= 18;
+    } else {
+      // Continuation cover header
+      page.drawText(`Included Documents (Continued - ${tender.tender_id})`, {
+        x: 54,
+        y: cursorY,
+        size: 12,
+        font: helveticaBold,
+        color: rgb(0.1, 0.12, 0.16),
+      });
+      cursorY -= 14;
+
+      page.drawLine({
+        start: { x: 54, y: cursorY },
+        end: { x: A4_WIDTH - 54, y: cursorY },
+        thickness: 0.75,
+        color: rgb(0.85, 0.87, 0.9),
+      });
+      cursorY -= 20;
+    }
+
+    // Render document list rows on this cover page
+    while (docIndex < includedDocs.length && cursorY > 64) {
+      const doc = includedDocs[docIndex];
+      docIndex++;
+      if (!doc) continue;
+
+      const orderLabel = `${doc.req.order}.`;
+      page.drawText(orderLabel, {
+        x: 54,
+        y: cursorY,
+        size: 9.5,
+        font: helveticaBold,
+        color: rgb(0.2, 0.25, 0.3),
+      });
+
+      const titleText = doc.req.title_en;
+      page.drawText(titleText, {
+        x: 76,
+        y: cursorY,
+        size: 9.5,
+        font: helvetica,
+        color: rgb(0.12, 0.15, 0.2),
+      });
+
+      const fileInfo = `${doc.file.name} (${doc.pageCount} ${doc.pageCount === 1 ? 'page' : 'pages'})`;
+      const fileInfoWidth = helvetica.widthOfTextAtSize(fileInfo, 8.5);
+      page.drawText(fileInfo, {
+        x: A4_WIDTH - 54 - fileInfoWidth,
+        y: cursorY,
+        size: 8.5,
+        font: helvetica,
+        color: rgb(0.4, 0.45, 0.5),
+      });
+
+      cursorY -= 20;
+    }
   }
 
-  cursorY -= 12;
+  // 2. Draw Index Page(s) if enabled
+  const docStartPages: Record<string, number> = {};
+  let currentRunningPage = coverPageCount + indexPageCount + 1;
 
-  // Horizontal Rule before Document List
-  coverPage.drawLine({
-    start: { x: marginX, y: cursorY },
-    end: { x: A4_WIDTH - marginX, y: cursorY },
-    thickness: 0.75,
-    color: rgb(0.8, 0.8, 0.8),
-  });
-  cursorY -= 24;
-
-  // Document List Header
-  coverPage.drawText('SCHEDULE OF INCLUDED DOCUMENTS', {
-    x: marginX,
-    y: cursorY,
-    size: 11,
-    font: helveticaBoldFont,
-    color: rgb(0.1, 0.1, 0.1),
-  });
-  cursorY -= 20;
-
-  // Table header
-  coverPage.drawText('Order', { x: marginX, y: cursorY, size: 8.5, font: helveticaBoldFont, color: rgb(0.4, 0.4, 0.4) });
-  coverPage.drawText('Document Title', { x: marginX + 45, y: cursorY, size: 8.5, font: helveticaBoldFont, color: rgb(0.4, 0.4, 0.4) });
-  coverPage.drawText('Source File', { x: marginX + 270, y: cursorY, size: 8.5, font: helveticaBoldFont, color: rgb(0.4, 0.4, 0.4) });
-  coverPage.drawText('Pages', { x: A4_WIDTH - marginX - 40, y: cursorY, size: 8.5, font: helveticaBoldFont, color: rgb(0.4, 0.4, 0.4) });
-  cursorY -= 14;
-
-  coverPage.drawLine({
-    start: { x: marginX, y: cursorY },
-    end: { x: A4_WIDTH - marginX, y: cursorY },
-    thickness: 0.5,
-    color: rgb(0.85, 0.85, 0.85),
-  });
-  cursorY -= 16;
-
-  // Render list of included documents
-  includedItems.forEach((item, index) => {
-    if (cursorY > 60) {
-      const orderStr = String(index + 1).padStart(2, '0');
-      const docTitle = sanitizeAscii(item.req.title_en);
-      const fileName = sanitizeAscii(item.file.name);
-      const pageStr = `${item.file.pageCount} p.`;
-
-      // Truncate long strings
-      const safeTitle = docTitle.length > 36 ? docTitle.slice(0, 34) + '...' : docTitle;
-      const safeFileName = fileName.length > 28 ? fileName.slice(0, 26) + '...' : fileName;
-
-      coverPage.drawText(orderStr, { x: marginX, y: cursorY, size: 8.5, font: helveticaBoldFont, color: rgb(0.3, 0.3, 0.3) });
-      coverPage.drawText(safeTitle, { x: marginX + 45, y: cursorY, size: 8.5, font: helveticaFont, color: rgb(0.1, 0.1, 0.1) });
-      coverPage.drawText(safeFileName, { x: marginX + 270, y: cursorY, size: 8, font: helveticaFont, color: rgb(0.45, 0.45, 0.45) });
-      coverPage.drawText(pageStr, { x: A4_WIDTH - marginX - 35, y: cursorY, size: 8.5, font: helveticaFont, color: rgb(0.2, 0.2, 0.2) });
-
-      cursorY -= 16;
-    }
-  });
-
-  // -----------------------------------------------------------------
-  // BONUS: INDEX PAGE (Page 2 if enabled)
-  // -----------------------------------------------------------------
-  const docStartPages: number[] = [];
-  let runningPageCounter = 1 + (includeIndexPage ? 1 : 0);
+  for (const doc of includedDocs) {
+    docStartPages[doc.req.id] = currentRunningPage;
+    currentRunningPage += doc.pageCount;
+  }
 
   if (includeIndexPage) {
     onProgress?.({
-      phase: 'cover',
-      currentDocIndex: 0,
-      totalDocs: includedItems.length,
-      messageEn: 'Generating document index directory...',
-      messageBn: 'সূচিপত্র তৈরি করা হচ্ছে...',
+      phase: 'index',
+      current: 25,
+      total: 100,
+      title: 'Generating index page',
+      pages: indexPageCount,
     });
 
-    const indexPage = mergedPdf.addPage([A4_WIDTH, A4_HEIGHT]);
-    let indexCursorY = A4_HEIGHT - 60;
+    let indexDocIdx = 0;
+    for (let ip = 0; ip < indexPageCount; ip++) {
+      const page = mergedDoc.addPage([A4_WIDTH, A4_HEIGHT]);
+      let cursorY = A4_HEIGHT - 54;
 
-    indexPage.drawText('DOCUMENT INDEX DIRECTORY', {
-      x: marginX,
-      y: indexCursorY,
-      size: 16,
-      font: helveticaBoldFont,
-      color: rgb(0.1, 0.1, 0.1),
-    });
-    indexCursorY -= 20;
-
-    indexPage.drawText('Page navigation for all attached documents in this package:', {
-      x: marginX,
-      y: indexCursorY,
-      size: 9.5,
-      font: helveticaFont,
-      color: rgb(0.4, 0.4, 0.4),
-    });
-    indexCursorY -= 25;
-
-    indexPage.drawLine({
-      start: { x: marginX, y: indexCursorY },
-      end: { x: A4_WIDTH - marginX, y: indexCursorY },
-      thickness: 0.75,
-      color: rgb(0.8, 0.8, 0.8),
-    });
-    indexCursorY -= 18;
-
-    includedItems.forEach((item, index) => {
-      const startPage = runningPageCounter + 1;
-      docStartPages.push(startPage);
-
-      const title = sanitizeAscii(item.req.title_en);
-      const safeTitle = title.length > 45 ? title.slice(0, 43) + '...' : title;
-
-      indexPage.drawText(`${index + 1}.  ${safeTitle}`, {
-        x: marginX,
-        y: indexCursorY,
-        size: 9,
-        font: helveticaBoldFont,
-        color: rgb(0.15, 0.15, 0.15),
+      page.drawText('DOCUMENT INDEX', {
+        x: 54,
+        y: cursorY,
+        size: 14,
+        font: helveticaBold,
+        color: rgb(0.1, 0.12, 0.16),
       });
+      cursorY -= 14;
 
-      indexPage.drawText(`Page ${startPage}`, {
-        x: A4_WIDTH - marginX - 50,
-        y: indexCursorY,
-        size: 9,
-        font: helveticaFont,
-        color: rgb(0.36, 0.42, 0.48),
+      page.drawLine({
+        start: { x: 54, y: cursorY },
+        end: { x: A4_WIDTH - 54, y: cursorY },
+        thickness: 0.75,
+        color: rgb(0.85, 0.87, 0.9),
       });
+      cursorY -= 22;
 
-      indexCursorY -= 18;
-      runningPageCounter += item.file.pageCount;
-    });
-  }
+      // Table Header
+      page.drawText('Order', { x: 54, y: cursorY, size: 9, font: helveticaBold, color: rgb(0.35, 0.4, 0.45) });
+      page.drawText('Document Name', { x: 96, y: cursorY, size: 9, font: helveticaBold, color: rgb(0.35, 0.4, 0.45) });
+      page.drawText('Start Page', { x: A4_WIDTH - 110, y: cursorY, size: 9, font: helveticaBold, color: rgb(0.35, 0.4, 0.45) });
+      cursorY -= 16;
 
-  // -----------------------------------------------------------------
-  // BODY: MERGE ALL INCLUDED DOCUMENTS (IN ORIGINAL PAGE ORDER)
-  // -----------------------------------------------------------------
-  for (let i = 0; i < includedItems.length; i++) {
-    const item = includedItems[i];
-    if (!item) continue;
+      page.drawLine({
+        start: { x: 54, y: cursorY },
+        end: { x: A4_WIDTH - 54, y: cursorY },
+        thickness: 0.5,
+        color: rgb(0.9, 0.92, 0.95),
+      });
+      cursorY -= 18;
 
-    onProgress?.({
-      phase: 'merging',
-      currentDocIndex: i + 1,
-      totalDocs: includedItems.length,
-      messageEn: `Merging document ${i + 1} of ${includedItems.length}: ${item.req.title_en}...`,
-      messageBn: `নথি ${i + 1}/${includedItems.length} যুক্ত করা হচ্ছে: ${item.req.title_en}...`,
-    });
+      while (indexDocIdx < includedDocs.length && cursorY > 64) {
+        const doc = includedDocs[indexDocIdx];
+        indexDocIdx++;
+        if (!doc) continue;
 
-    const srcDoc = await PDFDocument.load(item.buffer, { ignoreEncryption: true });
-    const copiedPages = await mergedPdf.copyPages(srcDoc, srcDoc.getPageIndices());
+        const startPg = docStartPages[doc.req.id];
 
-    for (const page of copiedPages) {
-      mergedPdf.addPage(page);
-    }
-  }
-
-  // -----------------------------------------------------------------
-  // FOOTER ON EVERY PAGE (INCLUDING COVER & INDEX)
-  // Rule: white rectangle (height 20pt at bottom), centered 8pt Helvetica #333 text:
-  // "${tenderId} | Page ${i} of ${Y}"
-  // Rule 6.4: Must not obscure page content. We calculate bottom bounds accurately.
-  // -----------------------------------------------------------------
-  onProgress?.({
-    phase: 'footing',
-    currentDocIndex: includedItems.length,
-    totalDocs: includedItems.length,
-    messageEn: `Applying standardized footers on all ${totalPagesY} pages...`,
-    messageBn: `সকল ${totalPagesY} পৃষ্ঠায় ফুটার যুক্ত করা হচ্ছে...`,
-  });
-
-  const allPages = mergedPdf.getPages();
-  const footerTextPrefix = sanitizeAscii(tender.tender_id);
-
-  // Embed seal image if provided (Bonus feature)
-  let embeddedSealImage: Awaited<ReturnType<typeof mergedPdf.embedPng>> | null = null;
-  if (sealImageBytes && sealImageBytes.length > 0) {
-    try {
-      embeddedSealImage = await mergedPdf.embedPng(sealImageBytes);
-    } catch {
-      embeddedSealImage = null;
-    }
-  }
-
-  allPages.forEach((page, pageIndex) => {
-    const pageNum = pageIndex + 1;
-    const { width: pWidth, height: pHeight } = page.getSize();
-    const rotation = page.getRotation().angle;
-
-    // 1. Draw white background strip (height 20pt) at bottom
-    page.drawRectangle({
-      x: 0,
-      y: 0,
-      width: pWidth,
-      height: 20,
-      color: rgb(1, 1, 1), // White rectangle
-    });
-
-    // 2. Centered footer text: "${tenderId} | Page ${i} of ${Y}"
-    const footerText = `${footerTextPrefix} | Page ${pageNum} of ${totalPagesY}`;
-    const textWidth = helveticaFont.widthOfTextAtSize(footerText, 8);
-    const textX = Math.max((pWidth - textWidth) / 2, 10);
-    const textY = 6; // Centered vertically in 20pt strip
-
-    page.drawText(footerText, {
-      x: textX,
-      y: textY,
-      size: 8,
-      font: helveticaFont,
-      color: rgb(0.2, 0.2, 0.2), // #333 equivalent
-    });
-
-    // 3. Digital Seal / Signature placement (if enabled)
-    if (embeddedSealImage && sealPlacement) {
-      let shouldPlaceSeal = false;
-      if (sealPlacement.scope === 'all') shouldPlaceSeal = true;
-      else if (sealPlacement.scope === 'first' && pageNum === 1) shouldPlaceSeal = true;
-      else if (sealPlacement.scope === 'last' && pageNum === allPages.length) shouldPlaceSeal = true;
-
-      if (shouldPlaceSeal) {
-        const sealDims = embeddedSealImage.scale(0.2 * (sealPlacement.sizePercent / 100));
-        let sealX = pWidth - sealDims.width - 24;
-        let sealY = 28; // Just above 20pt footer
-
-        if (sealPlacement.corner === 'bottom-left') {
-          sealX = 24;
-          sealY = 28;
-        } else if (sealPlacement.corner === 'top-right') {
-          sealX = pWidth - sealDims.width - 24;
-          sealY = pHeight - sealDims.height - 24;
-        } else if (sealPlacement.corner === 'top-left') {
-          sealX = 24;
-          sealY = pHeight - sealDims.height - 24;
-        }
-
-        page.drawImage(embeddedSealImage, {
-          x: sealX,
-          y: sealY,
-          width: sealDims.width,
-          height: sealDims.height,
-          rotate: degrees(rotation),
+        page.drawText(String(doc.req.order), {
+          x: 54,
+          y: cursorY,
+          size: 9.5,
+          font: helveticaBold,
+          color: rgb(0.2, 0.25, 0.3),
         });
+
+        page.drawText(doc.req.title_en, {
+          x: 96,
+          y: cursorY,
+          size: 9.5,
+          font: helvetica,
+          color: rgb(0.12, 0.15, 0.2),
+        });
+
+        page.drawText(`Page ${startPg}`, {
+          x: A4_WIDTH - 110,
+          y: cursorY,
+          size: 9.5,
+          font: helveticaBold,
+          color: rgb(0.15, 0.3, 0.55),
+        });
+
+        cursorY -= 22;
       }
     }
+  }
+
+  // 3. Merge Body Document Pages
+  onProgress?.({
+    phase: 'merging',
+    current: 40,
+    total: 100,
+    title: 'Merging document pages',
+    pages: totalBodyPages,
   });
+
+  const bodyPageIndices: number[] = [];
+
+  for (let i = 0; i < includedDocs.length; i++) {
+    const doc = includedDocs[i];
+    if (!doc) continue;
+    const buffer = getBuffer(doc.file.id);
+    if (!buffer) continue;
+
+    // Load source document
+    const srcDoc = await PDFDocument.load(buffer.slice(0));
+    const pageIndices = srcDoc.getPageIndices();
+    const copiedPages = await mergedDoc.copyPages(srcDoc, pageIndices);
+
+    for (const page of copiedPages) {
+      const addedPage = mergedDoc.addPage(page);
+      bodyPageIndices.push(mergedDoc.getPageCount() - 1);
+
+      // Section 6.4: Expand page visible box at visual bottom by FOOTER_STRIP_HEIGHT (20pt)
+      // so the footer does NOT cover any existing content!
+      growPageBottom(addedPage, FOOTER_STRIP_HEIGHT);
+    }
+
+    const pct = 40 + Math.round(((i + 1) / includedDocs.length) * 35);
+    onProgress?.({
+      phase: 'merging',
+      current: pct,
+      total: 100,
+      title: `Merged: ${doc.req.title_en}`,
+      pages: mergedDoc.getPageCount(),
+    });
+  }
+
+  // 4. Draw Running Footer on EVERY Page (Cover, Index, and Body)
+  onProgress?.({
+    phase: 'footers',
+    current: 80,
+    total: 100,
+    title: 'Applying running footers',
+    pages: totalPackagePages,
+  });
+
+  const totalPages = mergedDoc.getPageCount();
+  const footerFont = helvetica;
+  const footerFontSize = 8;
+  const footerTextColor = rgb(0.2, 0.2, 0.2);
+
+  for (let p = 0; p < totalPages; p++) {
+    const page = mergedDoc.getPage(p);
+    const pageNum = p + 1;
+    const footerText = `${tender.tender_id} | Page ${pageNum} of ${totalPages}`;
+
+    drawPageFooter(page, footerText, footerFont, footerFontSize, footerTextColor, FOOTER_STRIP_HEIGHT);
+  }
+
+  // 5. Apply Seal/Signature Stamping if configured
+  if (seal && seal.imageBytes && seal.imageBytes.byteLength > 0) {
+    try {
+      const sealImg = await mergedDoc.embedPng(seal.imageBytes);
+      applySeal(mergedDoc, seal, sealImg, includedDocs, docStartPages);
+    } catch {
+      // If seal embedding fails, proceed with the package without corrupting output
+    }
+  }
 
   onProgress?.({
-    phase: 'complete',
-    currentDocIndex: includedItems.length,
-    totalDocs: includedItems.length,
-    messageEn: 'Package compiled successfully!',
-    messageBn: 'প্যাকেজ সংকলন সফল হয়েছে!',
+    phase: 'done',
+    current: 100,
+    total: 100,
+    title: 'Package generated successfully',
+    pages: totalPages,
   });
 
-  const pdfBytes = await mergedPdf.save();
-  const safeFilename = `${sanitizeFilename(tender.tender_id)}_Package.pdf`;
+  const pdfBytes = await mergedDoc.save();
+  const filename = sanitizeFilename(tender.tender_id);
 
   return {
     pdfBytes,
-    filename: safeFilename,
-    totalPages: totalPagesY,
+    filename,
+    totalPages,
+    docStartPages,
   };
 }
 
 /**
- * Trigger immediate browser download of the generated PDF Blob
+ * Expands a page's visible box by stripHeight at the visual bottom based on rotation.
  */
-export function downloadPdfBlob(bytes: Uint8Array, filename: string): void {
-  const blob = new Blob([bytes.buffer as ArrayBuffer], { type: 'application/pdf' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+function growPageBottom(page: PDFPage, stripHeight: number): void {
+  const rotation = page.getRotation().angle;
+  const mediaBox = page.getMediaBox();
+  const cropBox = page.getCropBox() || mediaBox;
+
+  let x = cropBox.x;
+  let y = cropBox.y;
+  let width = cropBox.width;
+  let height = cropBox.height;
+
+  switch (rotation) {
+    case 0:
+      y -= stripHeight;
+      height += stripHeight;
+      break;
+    case 90:
+      width += stripHeight;
+      break;
+    case 180:
+      height += stripHeight;
+      break;
+    case 270:
+      x -= stripHeight;
+      width += stripHeight;
+      break;
+  }
+
+  page.setCropBox(x, y, width, height);
+
+  // Ensure MediaBox contains the CropBox
+  const mx = Math.min(mediaBox.x, x);
+  const my = Math.min(mediaBox.y, y);
+  const mw = Math.max(mediaBox.x + mediaBox.width, x + width) - mx;
+  const mh = Math.max(mediaBox.y + mediaBox.height, y + height) - my;
+  page.setMediaBox(mx, my, mw, mh);
+}
+
+/**
+ * Draws a clean white footer strip and centered footer text at the visual bottom of the page.
+ */
+function drawPageFooter(
+  page: PDFPage,
+  text: string,
+  font: PDFFont,
+  fontSize: number,
+  color: ReturnType<typeof rgb>,
+  stripHeight: number
+): void {
+  const rotation = page.getRotation().angle;
+  const cropBox = page.getCropBox() || page.getMediaBox();
+  const { x, y, width, height } = cropBox;
+
+  // Visual dimensions
+  const isRotated90or270 = rotation === 90 || rotation === 270;
+  const visualWidth = isRotated90or270 ? height : width;
+
+  const textWidth = font.widthOfTextAtSize(text, fontSize);
+  const textXVisual = (visualWidth - textWidth) / 2;
+  const textYVisual = 6; // Centered vertically in 20pt strip
+
+  // Map visual coords (vx, vy) to PDF user coords based on rotation
+  const mapCoords = (vx: number, vy: number): { x: number; y: number } => {
+    switch (rotation) {
+      case 0:
+        return { x: x + vx, y: y + vy };
+      case 90:
+        return { x: x + width - vy, y: y + vx };
+      case 180:
+        return { x: x + width - vx, y: y + height - vy };
+      case 270:
+        return { x: x + vy, y: y + height - vx };
+      default:
+        return { x: x + vx, y: y + vy };
+    }
+  };
+
+  // Draw white rectangle across footer strip
+  const stripOrigin = mapCoords(0, 0);
+
+  let rectW = visualWidth;
+  let rectH = stripHeight;
+
+  if (rotation === 90) {
+    rectW = stripHeight;
+    rectH = visualWidth;
+  } else if (rotation === 270) {
+    rectW = stripHeight;
+    rectH = visualWidth;
+  }
+
+  // Draw white strip
+  page.drawRectangle({
+    x: rotation === 90 ? stripOrigin.x - stripHeight : stripOrigin.x,
+    y: rotation === 180 ? stripOrigin.y - stripHeight : stripOrigin.y,
+    width: rectW,
+    height: rectH,
+    color: rgb(1, 1, 1),
+    borderWidth: 0,
+  });
+
+  // Draw footer text
+  const textOrigin = mapCoords(textXVisual, textYVisual);
+  page.drawText(text, {
+    x: textOrigin.x,
+    y: textOrigin.y,
+    size: fontSize,
+    font,
+    color,
+    rotate: degrees(rotation),
+  });
+}
+
+/**
+ * Applies a seal/signature PNG image to designated pages.
+ */
+function applySeal(
+  mergedDoc: PDFDocument,
+  seal: SealSettings,
+  sealImg: ReturnType<PDFDocument['embedPng']> extends Promise<infer T> ? T : never,
+  includedDocs: IncludedDoc[],
+  docStartPages: Record<string, number>
+): void {
+  const totalPages = mergedDoc.getPageCount();
+  const targetPages = new Set<number>();
+
+  switch (seal.scope) {
+    case 'all':
+      for (let i = 1; i <= totalPages; i++) targetPages.add(i);
+      break;
+    case 'doc-first':
+      for (const doc of includedDocs) {
+        if (!doc) continue;
+        const start = docStartPages[doc.req.id];
+        if (start) targetPages.add(start);
+      }
+      break;
+    case 'doc-last':
+      for (const doc of includedDocs) {
+        if (!doc) continue;
+        const start = docStartPages[doc.req.id];
+        if (start) targetPages.add(start + doc.pageCount - 1);
+      }
+      break;
+    case 'custom':
+      for (const p of parsePageRanges(seal.customPages, totalPages)) {
+        targetPages.add(p);
+      }
+      break;
+  }
+
+  for (const pageNum of targetPages) {
+    if (pageNum < 1 || pageNum > totalPages) continue;
+    const page = mergedDoc.getPage(pageNum - 1);
+    const box = page.getCropBox() || page.getMediaBox();
+
+    // Scale seal width relative to page width
+    const targetWidth = Math.max(50, (box.width * (seal.sizePercent || 20)) / 100);
+    const scale = targetWidth / sealImg.width;
+    const targetHeight = sealImg.height * scale;
+
+    const margin = 28;
+    let x = box.x + box.width - targetWidth - margin;
+    let y = box.y + FOOTER_STRIP_HEIGHT + margin;
+
+    if (seal.corner === 'bottom-left') {
+      x = box.x + margin;
+      y = box.y + FOOTER_STRIP_HEIGHT + margin;
+    } else if (seal.corner === 'top-right') {
+      x = box.x + box.width - targetWidth - margin;
+      y = box.y + box.height - targetHeight - margin;
+    } else if (seal.corner === 'top-left') {
+      x = box.x + margin;
+      y = box.y + box.height - targetHeight - margin;
+    }
+
+    page.drawImage(sealImg, {
+      x,
+      y,
+      width: targetWidth,
+      height: targetHeight,
+      opacity: 0.9,
+    });
+  }
 }

@@ -395,3 +395,40 @@ export const BotIcon: React.FC<IconProps> = ({ size = 20, className = '', ...pro
     <line x1="16" y1="16" x2="16" y2="16" />
   </svg>
 );
+
+export const StampIcon: React.FC<IconProps> = ({ size = 20, className = '', ...props }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.75"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="M5 22h14" />
+    <path d="M19.27 13.73A2.5 2.5 0 0 0 17.5 13h-11a2.5 2.5 0 0 0-1.77.73l-1.44 1.44A1 1 0 0 0 4 15.88V18h16v-2.12a1 1 0 0 0-.29-.71z" />
+    <path d="M14 13V8a2 2 0 0 0-4 0v5" />
+  </svg>
+);
+
+export const SparklesIcon: React.FC<IconProps> = ({ size = 20, className = '', ...props }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.75"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    className={className}
+    {...props}
+  >
+    <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z" />
+  </svg>
+);
+

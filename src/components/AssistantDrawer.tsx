@@ -2,16 +2,22 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Tender,
-  StatusSummary,
+  Requirement,
+  UploadedFile,
+  BlockerDetail,
   AppLanguage,
   AssistantMessage,
 } from '../types';
 import { t } from '../i18n';
 import {
   getSavedApiKey,
-  queryAssistant,
+  getSavedModel,
+  getSavedProvider,
+  askAssistant,
 } from '../lib/assistant';
-import { tts } from '../lib/tts';
+import { tts, TTSState } from '../lib/tts';
+import { TypewriterText } from './TypewriterText';
+import { Equalizer } from './Equalizer';
 import {
   BotIcon,
   XIcon,
@@ -25,7 +31,9 @@ interface AssistantDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   tender: Tender | null;
-  statusSummary: StatusSummary;
+  requirements: Requirement[];
+  files: UploadedFile[];
+  blockers: BlockerDetail[];
   lang: AppLanguage;
   onOpenSettings: () => void;
 }
@@ -34,7 +42,9 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
   isOpen,
   onClose,
   tender,
-  statusSummary,
+  requirements,
+  files,
+  blockers,
   lang,
   onOpenSettings,
 }) => {
@@ -43,22 +53,21 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       id: 'welcome-msg',
       sender: 'assistant',
       contentEn:
-        'Hello! I am your AI Tender Compliance Assistant. I can review your document checklist, identify missing/expired files, and check submission readiness.',
+        'Hello! I am your AI Tender Compliance Assistant. I can review your document checklist, identify missing or expired files, explain blocking issues, and verify submission readiness.',
       contentBn:
         'স্বাগতম! আমি আপনার টেন্ডার এআই সহকারী। আমি আপনার নথিপত্রের তালিকা যাচাই করতে, মেয়াদোত্তীর্ণ বা অনুপস্থিত ফাইল শনাক্ত করতে এবং প্রস্তুত হতে সহায়তা করতে পারি।',
-      timestamp: Date.now(),
     },
   ]);
   const [inputValue, setInputValue] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [ttsState, setTtsState] = useState<TTSState>({ isSpeaking: false, currentMessageId: null });
   const [replyTabs, setReplyTabs] = useState<Record<string, 'en' | 'bn'>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Subscribe to TTS status changes
   useEffect(() => {
-    const unsubscribe = tts.subscribe((speaking) => {
-      setIsSpeaking(speaking);
+    const unsubscribe = tts.subscribe((state) => {
+      setTtsState(state);
     });
     return () => {
       unsubscribe();
@@ -89,7 +98,6 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
       sender: 'user',
       contentEn: trimmed,
       contentBn: trimmed,
-      timestamp: Date.now(),
     };
 
     setMessages((prev) => [...prev, userMsg]);
@@ -97,23 +105,40 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     setIsLoading(true);
 
     try {
-      const response = await queryAssistant(trimmed, tender, statusSummary);
+      const history = messages.map((m) => ({
+        role: m.sender,
+        content: m.contentEn,
+      }));
+
+      const reply = await askAssistant({
+        apiKey: getSavedApiKey(),
+        provider: getSavedProvider(),
+        model: getSavedModel(),
+        userMessage: trimmed,
+        history,
+        tender,
+        requirements,
+        files,
+        blockers,
+      });
+
       const assistantMsg: AssistantMessage = {
         id: `asst-${Date.now()}`,
         sender: 'assistant',
-        contentEn: response.en,
-        contentBn: response.bn,
-        timestamp: Date.now(),
+        contentEn: reply.en,
+        contentBn: reply.bn,
+        raw: reply.raw,
+        reveal: true,
       };
+
       setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : 'Unknown assistant error';
       const errorMsg: AssistantMessage = {
         id: `err-${Date.now()}`,
         sender: 'assistant',
-        contentEn: `Error: ${errMsg}. Please verify your API key in settings.`,
-        contentBn: `সমস্যা: ${errMsg}। অনুগ্রহ করে সেটিংসে আপনার এপিআই কি যাচাই করুন।`,
-        timestamp: Date.now(),
+        contentEn: `Error: ${errMsg}. Please verify your API key and model in Settings.`,
+        contentBn: `সমস্যা: ${errMsg}। অনুগ্রহ করে সেটিংসে আপনার এপিআই কি ও মডেল যাচাই করুন।`,
       };
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
@@ -127,11 +152,11 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
     }
   };
 
-  const handleSpeak = (text: string) => {
-    if (isSpeaking) {
+  const handleToggleSpeak = (msgId: string, englishText: string) => {
+    if (ttsState.isSpeaking && ttsState.currentMessageId === msgId) {
       tts.stop();
     } else {
-      tts.speak(text);
+      tts.speak(msgId, englishText);
     }
   };
 
@@ -146,19 +171,19 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
             className="fixed inset-0 z-40 bg-black/40 backdrop-blur-xs select-none"
           />
 
-          {/* Right Drawer: 400px wide, Dark #0A0A0A in BOTH themes */}
+          {/* Right Drawer: 420px wide */}
           <motion.aside
             id="assistant-drawer"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
-            transition={{ duration: 0.32, ease: [0.16, 1, 0.3, 1] }}
-            className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-[400px] bg-[#0A0A0A] text-[#E5E5E5] border-l border-white/10 shadow-2xl flex flex-col select-none"
+            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+            className="fixed top-0 right-0 bottom-0 z-50 w-full max-w-[420px] bg-[#0A0A0A] text-[#E5E5E5] border-l border-white/10 shadow-2xl flex flex-col select-none"
           >
             {/* Header */}
             <div className="h-[60px] px-5 border-b border-white/10 flex items-center justify-between">
               <div className="flex items-center gap-2.5">
-                <div className="p-1.5 rounded bg-white/5 border border-white/10 text-accent-steel">
+                <div className="p-1.5 rounded-lg bg-white/5 border border-white/10 text-accent-steel">
                   <BotIcon size={18} />
                 </div>
                 <div>
@@ -208,6 +233,8 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
               {messages.map((msg) => {
                 const activeTab = replyTabs[msg.id] || (lang === 'bn' ? 'bn' : 'en');
                 const content = activeTab === 'bn' ? msg.contentBn : msg.contentEn;
+                const isThisSpeaking =
+                  ttsState.isSpeaking && ttsState.currentMessageId === msg.id;
 
                 return (
                   <div
@@ -217,10 +244,10 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                     }`}
                   >
                     <div
-                      className={`max-w-[88%] rounded p-3 text-xs leading-relaxed ${
+                      className={`max-w-[90%] rounded-xl p-3.5 text-xs leading-relaxed ${
                         msg.sender === 'user'
                           ? 'bg-[#1F1F1F] text-white border border-white/10'
-                          : 'bg-[#141414] text-[#E5E5E5] border border-white/10'
+                          : 'bg-[#141414] text-[#E5E5E5] border border-white/10 shadow-xs'
                       }`}
                     >
                       {/* Language Tab Switcher for Assistant replies */}
@@ -234,7 +261,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                               }
                               className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer ${
                                 activeTab === 'en'
-                                  ? 'bg-accent-steel text-white'
+                                  ? 'bg-accent-steel text-white font-medium'
                                   : 'text-white/40 hover:text-white'
                               }`}
                             >
@@ -247,7 +274,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                               }
                               className={`px-1.5 py-0.5 rounded transition-colors cursor-pointer font-bangla ${
                                 activeTab === 'bn'
-                                  ? 'bg-accent-steel text-white'
+                                  ? 'bg-accent-steel text-white font-medium'
                                   : 'text-white/40 hover:text-white'
                               }`}
                             >
@@ -255,23 +282,17 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                             </button>
                           </div>
 
-                          {/* TTS Play/Stop Button with 4-Bar Equalizer */}
+                          {/* TTS Play/Stop Button with Equalizer */}
                           <button
                             type="button"
-                            onClick={() => handleSpeak(msg.contentEn)}
-                            className="inline-flex items-center gap-1.5 text-white/50 hover:text-white transition-colors cursor-pointer px-1 py-0.5 rounded"
-                            title={isSpeaking ? 'Stop voice' : 'Listen in English'}
+                            onClick={() => handleToggleSpeak(msg.id, msg.contentEn)}
+                            className="inline-flex items-center gap-1.5 text-white/50 hover:text-white transition-colors cursor-pointer px-1.5 py-0.5 rounded hover:bg-white/5"
+                            title={isThisSpeaking ? 'Stop voice' : 'Listen in English'}
                           >
-                            {isSpeaking ? (
+                            {isThisSpeaking ? (
                               <>
                                 <StopIcon size={12} className="text-[#D98A8C]" />
-                                {/* 4-Bar Equalizer Animation */}
-                                <div className="flex items-end gap-0.5 h-3 px-0.5">
-                                  <span className="w-0.5 bg-accent-steel animate-pulse h-2.5" />
-                                  <span className="w-0.5 bg-accent-steel animate-pulse h-3 delay-75" />
-                                  <span className="w-0.5 bg-accent-steel animate-pulse h-1.5 delay-150" />
-                                  <span className="w-0.5 bg-accent-steel animate-pulse h-2 delay-200" />
-                                </div>
+                                <Equalizer isSpeaking={true} />
                               </>
                             ) : (
                               <>
@@ -283,7 +304,18 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                         </div>
                       )}
 
-                      <div className="whitespace-pre-wrap">{content}</div>
+                      <div className="whitespace-pre-wrap">
+                        {msg.reveal && msg.sender === 'assistant' ? (
+                          <TypewriterText
+                            text={content}
+                            onComplete={() => {
+                              msg.reveal = false;
+                            }}
+                          />
+                        ) : (
+                          content
+                        )}
+                      </div>
                     </div>
                   </div>
                 );
@@ -291,7 +323,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
 
               {/* Loading Indicator */}
               {isLoading && (
-                <div className="flex items-center gap-2 text-white/50 text-[11px] p-2 bg-[#141414] rounded border border-white/10 w-fit">
+                <div className="flex items-center gap-2 text-white/50 text-[11px] p-2 bg-[#141414] rounded-lg border border-white/10 w-fit">
                   <span className="w-2 h-2 rounded-full bg-accent-steel animate-ping" />
                   <span>
                     {lang === 'bn'
@@ -307,14 +339,14 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
             {/* Input Box */}
             <div className="p-3 border-t border-white/10 bg-[#0E0E0E]">
               {!hasApiKey ? (
-                <div className="flex flex-col gap-2 p-2.5 rounded bg-white/5 border border-white/10 text-center">
+                <div className="flex flex-col gap-2 p-3 rounded-lg bg-white/5 border border-white/10 text-center">
                   <p className="text-[11px] text-white/70">
                     {t('assistant_key_prompt', undefined, lang)}
                   </p>
                   <button
                     type="button"
                     onClick={onOpenSettings}
-                    className="self-center px-3 py-1 rounded bg-accent-steel text-white text-xs font-medium cursor-pointer"
+                    className="self-center px-3.5 py-1.5 rounded-md bg-accent-steel text-white text-xs font-medium cursor-pointer hover:opacity-90 transition-opacity"
                   >
                     {t('btn_settings', undefined, lang)}
                   </button>
@@ -328,7 +360,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                     onChange={(e) => setInputValue(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder={t('assistant_input_placeholder', undefined, lang)}
-                    className="flex-1 py-2 px-3 rounded border border-white/10 bg-[#161616] text-white text-xs placeholder:text-white/30 focus:outline-hidden focus:border-accent-steel"
+                    className="flex-1 py-2 px-3 rounded-md border border-white/10 bg-[#161616] text-white text-xs placeholder:text-white/30 focus:outline-hidden focus:border-accent-steel"
                     disabled={isLoading}
                   />
                   <button
@@ -336,7 +368,7 @@ export const AssistantDrawer: React.FC<AssistantDrawerProps> = ({
                     id="assistant-send-btn"
                     onClick={handleSend}
                     disabled={isLoading || !inputValue.trim()}
-                    className="p-2 rounded bg-white text-black hover:bg-white/90 transition-opacity cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                    className="p-2 rounded-md bg-white text-black hover:bg-white/90 transition-opacity cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
                     aria-label="Send"
                   >
                     <SendIcon size={15} />
